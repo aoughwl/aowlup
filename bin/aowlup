@@ -537,35 +537,54 @@ function readyDir(c) {
 }
 function cmdSetup(yes) {
   process.stdout.write(banner(yes ? "installing the toolchain" : "setup plan  " + C.dim("(add --yes to execute)")));
+  // shared source libs (consumed via -p:, no build) that components' build.sh
+  // scripts reference by env — clone them BEFORE the components that need them.
+  const sharedLibs = [
+    { name: "aowlkit", slug: "aoughwl/aowlkit", dir: path.join(HOME, "aowlkit"), lib: true },
+    { name: "aowlhl",  slug: "aoughwl/aowlhl",  dir: path.join(HOME, "aowlhl"),  lib: true },
+  ];
   const comps = [
     { name: "nimony", slug: "nim-lang/nimony", dir: path.join(HOME, "nimony"), first: true },
+    ...sharedLibs,
     ...setupComponents(),
   ];
+  // Component build.sh scripts expect the freshly-built toolchain on PATH + a few
+  // env paths (a classic NIM, the built NIMONY, its src, and the shared libs).
+  const buildEnv = () => Object.assign({}, process.env, {
+    PATH: path.join(HOME, "nimony", "bin") + path.delimiter + (process.env.PATH || ""),
+    NIM: findNim(),
+    NIMONY: path.join(HOME, "nimony", "bin", "nimony"),
+    NIMONY_SRC: path.join(HOME, "nimony", "src"),
+    AOWLKIT: path.join(HOME, "aowlkit", "src"),
+    AOWLHL: path.join(HOME, "aowlhl", "src"),
+  });
   let clone = 0, build = 0, ready = 0;
   for (const c of comps) {
-    const tag = C.bold(C.white(c.name)) + C.dim("  " + c.slug) + (c.first ? C.violet("  ← bootstrap compiler") : "");
+    const tag = C.bold(C.white(c.name)) + C.dim("  " + c.slug) +
+      (c.first ? C.violet("  ← bootstrap compiler") : c.lib ? C.violet("  ← shared lib") : "");
     const hasDir = fs.existsSync(c.dir);
-    const rdir = c.first ? (hasBuiltBin(c.dir) ? c.dir : null) : readyDir(c);
+    const rdir = c.first ? (hasBuiltBin(c.dir) ? c.dir : null) : c.lib ? (hasDir ? c.dir : null) : readyDir(c);
     if (rdir) { console.log("  " + C.green(G.ok) + " " + tag + " " + C.green("ready") +
       (rdir !== c.dir ? C.dim("  " + rdir.replace(HOME, "~")) : "")); ready++; continue; }
     if (!hasDir) {
-      clone++; build++;
-      console.log("  " + C.amber("↓") + " " + tag + C.gray("  clone → " + c.dir.replace(HOME, "~") + " + build"));
+      clone++; if (!c.lib) build++;
+      console.log("  " + C.amber("↓") + " " + tag + C.gray("  clone → " + c.dir.replace(HOME, "~") + (c.lib ? "" : " + build")));
       if (yes) {
         const cr = cp.spawnSync("git", ["clone", "https://github.com/" + c.slug + ".git", c.dir], { stdio: "inherit" });
-        if (cr.status !== 0) { console.log("    " + C.red(G.cross + " clone failed")); continue; }
+        if (cr.status !== 0) { console.log("    " + C.red(G.cross + " clone failed") + C.dim("  (private repo? needs git access)")); continue; }
       }
-    } else { build++; console.log("  " + C.violet(G.gear) + " " + tag + C.gray("  present, needs build")); }
+    } else if (!c.lib) { build++; console.log("  " + C.violet(G.gear) + " " + tag + C.gray("  present, needs build")); }
+    if (c.lib) { if (yes) console.log("    " + C.green(G.ok + " ready") + C.dim(" (source lib, no build)")); ready++; continue; }
     if (yes && hasBuiltBin(c.dir)) { console.log("    " + C.green(G.ok + " ready") + C.dim(" (ships bin/, no build)")); continue; }
     if (yes) {
       const rec = buildRecipe(c.dir);
       if (!rec || (rec.cmd.includes("/") && !fs.existsSync(rec.cmd))) {
-        console.log("    " + C.amber(G.warn) + C.gray(" no runnable build recipe yet — build " + c.name + " manually" +
-          (c.first ? " (nimony bootstraps via its own toolchain; see its README)" : "")));
+        console.log("    " + C.amber(G.warn) + C.gray(" no build recipe — build " + c.name + " manually" +
+          (c.first ? " (see nimony README)" : "")));
         continue;
       }
       console.log("    " + C.violet(G.gear) + " " + C.teal(rec.hint) + C.gray(" …"));
-      const br = cp.spawnSync(rec.cmd, rec.args, { cwd: rec.cwd, stdio: "inherit" });
+      const br = cp.spawnSync(rec.cmd, rec.args, { cwd: rec.cwd, stdio: "inherit", env: c.first ? undefined : buildEnv() });
       console.log(br.status === 0 ? "    " + C.green(G.ok + " built") : "    " + C.red(G.cross + " build exited " + br.status));
     }
   }
