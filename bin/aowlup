@@ -1,0 +1,685 @@
+#!/usr/bin/env node
+// aowl — the one front door for the aoughwl stack: a version manager + resolver
+// for every layer of the pipeline (passes, backends, tooling), in the spirit of
+// rustup/nvm. Three axes, one binary:
+//
+//   1. VARIANTS  — each pipeline SLOT has interchangeable implementations. The
+//                  parser can be OUR aowlparser or nimony's nifler; sem can be
+//                  aowlsem or nimsem; lowering can be aowlhexer or nimony's hexer.
+//   2. PROFILES  — a named whole-stack selection:
+//                    aowl   = all-ours   (aowlparser + aowlsem  + aowlhexer)
+//                    nimony = all-nimony (nifler     + nimsem   + hexer)
+//                    hybrid = ours parser + nimony sem + ours hexer  ← the driver default
+//   3. VERSIONS  — every component is a git checkout of an aoughwl / nim-lang repo.
+//                  `aowl status` asks GitHub whether each is behind its branch;
+//                  `aowl update` pulls; `aowl build` rebuilds from source (there is
+//                  no official nimony binary — master/devel is built here).
+//
+// Commands:
+//   aowl init                      create ~/.aowl, auto-discover + register everything
+//   aowl doctor                    full resolution table for the ACTIVE profile
+//   aowl profile [list|use NAME]   show / switch the whole-stack profile
+//   aowl use SLOT VARIANT          override one slot (e.g. `aowl use sem nimsem`)
+//   aowl unset SLOT                drop a slot override (back to the profile default)
+//   aowl backend list|link|which   register a working repo / print a resolved exe
+//   aowl status [--json]           git rev of each component + GitHub update check
+//   aowl update [NAME] [--yes]     git pull (default: check only; --yes to apply)
+//   aowl build  NAME  [--yes]      rebuild a component from source (--yes to apply)
+//   aowl config [--lsp]            emit editor/LSP initializationOptions from the registry
+//
+// Resolution per slot (highest first): AOWL_<SLOT> env → slot override → active
+// profile's variant → dev-fallback probe → error.
+"use strict";
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const cp = require("child_process");
+
+const HOME = os.homedir();
+const AOWL_HOME = process.env.AOWL_HOME || path.join(HOME, ".aowl");
+const REG = path.join(AOWL_HOME, "registry.json");
+// Displayed program name derives from how we were invoked (installed as `aowlup`,
+// but the file lives at ~/.aowl/bin/aowl), so hints read correctly either way.
+const PROG = path.basename(process.argv[1] || "aowlup");
+
+// ============================ presentation layer =============================
+// No dependencies: truecolor ANSI, disabled on non-TTY / NO_COLOR / dumb terms.
+const COLOR = !process.env.NO_COLOR && process.env.TERM !== "dumb" &&
+  (!!process.env.FORCE_COLOR || !!process.stdout.isTTY);
+const rgb = (r, g, b) => (s) => COLOR ? `\x1b[38;2;${r};${g};${b}m${s}\x1b[0m` : String(s);
+const sgr = (a, z = 0) => (s) => COLOR ? `\x1b[${a}m${s}\x1b[${z}m` : String(s);
+const C = {
+  reset: "\x1b[0m",
+  bold: sgr(1, 22), dim: sgr(2, 22), ital: sgr(3, 23), under: sgr(4, 24),
+  // aoughwl palette — teal primary (the owl), violet for profiles.
+  teal: rgb(45, 212, 191), tealDim: rgb(20, 148, 136),
+  violet: rgb(167, 139, 250), green: rgb(52, 211, 153), amber: rgb(251, 191, 36),
+  red: rgb(248, 113, 113), cyan: rgb(103, 232, 249), gray: rgb(120, 130, 145),
+  white: rgb(228, 232, 240),
+};
+const G = { // glyphs
+  diamond: "◆", dot: "●", ring: "○", ok: "✓", down: "⬇", up: "▲", cross: "✗",
+  bullet: "·", gear: "⚙", arrow: "→", star: "★", bar: "│", warn: "⚠",
+};
+const stripAnsi = (s) => String(s).replace(/\x1b\[[0-9;]*m/g, "");
+const vlen = (s) => stripAnsi(s).length;
+const padE = (s, n) => s + " ".repeat(Math.max(0, n - vlen(s)));
+const padS = (s, n) => " ".repeat(Math.max(0, n - vlen(s))) + s;
+
+// A polished, ANSI-aware table: cols = [{title, align?}], rows = string[][] (cells
+// may be pre-styled). Header is dim+bold uppercase over a hairline rule.
+function table(cols, rows, indent = "  ") {
+  const w = cols.map((c, i) => Math.max(vlen(c.title), ...rows.map((r) => vlen(r[i] == null ? "" : r[i]))));
+  const cell = (txt, i) => (cols[i].align === "right" ? padS : padE)(txt, w[i]);
+  const gap = C.dim("  ");
+  const head = indent + cols.map((c, i) => C.bold(C.gray(cell(c.title.toUpperCase(), i)))).join("  ");
+  const rule = indent + cols.map((_, i) => C.dim("─".repeat(w[i]))).join("  ");
+  const body = rows.map((r) => indent + r.map((v, i) => cell(v == null ? "" : v, i)).join("  ")).join("\n");
+  return head + "\n" + rule + "\n" + body;
+}
+function banner(sub) {
+  const name = C.bold(C.teal(PROG));
+  const mark = C.teal(G.diamond);
+  return "\n  " + mark + " " + name + "  " + C.dim(G.bar) + "  " + C.gray(sub) + "\n";
+}
+function pill(txt, colorFn) { return colorFn(" " + txt + " "); } // color-block label
+const kv = (k, v) => "  " + C.gray(padE(k, 9)) + v;
+
+// ============================== slot catalog =================================
+const PREFIXES = ["aowl", "aif", "nif"];
+const fam = (stem) => PREFIXES.map((p) => p + stem);
+
+const SLOTS = [
+  { slot: "parser", kind: "pass", consumes: ".nim",   produces: ".p.nif",
+    variants: [
+      { id: "aowlparser", origin: "aoughwl", repoStem: "parser", binStem: "parser" },
+      { id: "nifler",     origin: "nimony",  repoDir: "nimony", bin: "nifler" },
+    ], note: "user modules; stdlib always via nifler" },
+  { slot: "sem", kind: "pass", consumes: ".p.nif", produces: ".s.nif",
+    variants: [
+      { id: "aowlsem", origin: "aoughwl", repoStem: "sem", binStem: "sem" },
+      { id: "nimsem",  origin: "nimony",  repoDir: "nimony", bin: "nimsem" },
+    ], note: "aowlsem m <in.p.nif> <out.s.nif>" },
+  { slot: "hexer", kind: "pass", consumes: ".s.nif", produces: ".c.nif",
+    variants: [
+      { id: "aowlhexer", origin: "aoughwl", repoStem: "hexer", binStem: "hexer" },
+      { id: "hexer",     origin: "nimony",  repoDir: "nimony", bin: "hexer" },
+    ], note: "c=lower, d=cross-module DCE" },
+  { slot: "opt", kind: "pass", consumes: ".s.nif", produces: ".s.nif",
+    variants: [{ id: "aowlsem", origin: "aoughwl", repoStem: "sem", binStem: "sem" }],
+    note: "high-level optimizer, folded into aowlsem" },
+  { slot: "native", kind: "backend", target: "native", consumes: ".c.nif", runner: "node",
+    variants: [{ id: "aowlc", origin: "aoughwl", repoStem: "c", binStem: "c" }],
+    modes: ["emit", "build", "run", "exec"], defaultMode: "run", needs: ["gcc"],
+    note: "node aowlc {mode} <f.c.nif>" },
+  { slot: "interp", kind: "backend", target: "interp", consumes: ".s.nif",
+    variants: [{ id: "aowli-interp", origin: "aoughwl", repoStem: "i", binStem: "i", binSuffix: "-interp" }],
+    note: "aowli-interp <f.s.nif> (tree-walk)" },
+  { slot: "vm", kind: "backend", target: "vm", consumes: ".s.nif",
+    variants: [{ id: "aowli-vm", origin: "aoughwl", repoStem: "i", binStem: "i", binSuffix: "-vm" }],
+    note: "aowli-vm <f.s.nif> (bytecode)" },
+  { slot: "js", kind: "backend", target: "js", consumes: ".s.nif", flags: ["--faithful"],
+    variants: [{ id: "aowljs", origin: "aoughwl", repoStem: "js", binStem: "js" }],
+    note: "aowljs [--faithful] <f.s.nif> → stdout" },
+  { slot: "ts", kind: "backend", target: "ts", consumes: ".s.nif", flags: ["--faithful"],
+    variants: [{ id: "aowlts", origin: "aoughwl", repoStem: "ts", binStem: "ts" }],
+    note: "aowlts [--faithful] <f.s.nif> → stdout" },
+  { slot: "py", kind: "backend", target: "py", consumes: ".s.nif",
+    variants: [{ id: "aowlpy", origin: "aoughwl", repoStem: "py", binStem: "py" }],
+    note: "aowlpy <f.s.nif> → stdout" },
+  { slot: "lsp", kind: "tool", consumes: ".nim",
+    variants: [{ id: "aowllsp", origin: "aoughwl", repoStem: "lsp", binStem: "lsp" }],
+    note: "language server" },
+  { slot: "suggest", kind: "tool", consumes: ".nim", cfgKey: "aowlsuggestExe",
+    variants: [{ id: "aowlsuggest", origin: "aoughwl", repoStem: "suggest", binStem: "suggest" }],
+    note: "quick-fix / lint layer (LSP delegates here)" },
+  { slot: "fmt", kind: "tool", consumes: ".nim", cfgKey: "aowlfmtExe",
+    variants: [{ id: "aowlfmt", origin: "aoughwl", repoStem: "fmt", binStem: "fmt" }],
+    note: "verified layout formatter" },
+  { slot: "lens", kind: "tool", consumes: ".s.nif", cfgKey: "aowllensExe",
+    variants: [{ id: "aowllens", origin: "aoughwl", repoStem: "lens", binStem: "lens" }],
+    note: "NIF-lens: decls/render/index/outline/query" },
+];
+const bySlot = Object.fromEntries(SLOTS.map((s) => [s.slot, s]));
+
+// Whole-stack profiles: only the PASS slots differ; backends/tooling are ours.
+// `hybrid` mirrors what the aowlmony driver actually runs today: our parser +
+// nimony sem (still inside `nimony c`) + our aowlhexer lowering.
+const PROFILES = {
+  aowl:   { parser: "aowlparser", sem: "aowlsem", hexer: "aowlhexer" },
+  nimony: { parser: "nifler",     sem: "nimsem",  hexer: "hexer" },
+  hybrid: { parser: "aowlparser", sem: "nimsem",  hexer: "aowlhexer" },
+};
+const DEFAULT_PROFILE = "hybrid";
+
+function probeVariant(v) {
+  if (v.origin === "nimony") {
+    const p = path.join(HOME, v.repoDir, "bin", v.bin);
+    return fs.existsSync(p) ? p : null;
+  }
+  const suf = v.binSuffix || "";
+  for (const repo of fam(v.repoStem)) {
+    for (const bin of fam(v.binStem)) {
+      const p = path.join(HOME, repo, "bin", bin + suf);
+      if (fs.existsSync(p)) return p;
+    }
+    const nc = path.join(HOME, repo, "nimcache");
+    try {
+      for (const d of fs.readdirSync(nc))
+        for (const bin of fam(v.binStem)) {
+          const p = path.join(nc, d, bin + suf);
+          if (fs.existsSync(p)) return p;
+        }
+    } catch (_) {}
+  }
+  return null;
+}
+function binUnder(v, prefix) {
+  if (v.origin === "nimony") {
+    const p = path.join(prefix, "bin", v.bin);
+    return fs.existsSync(p) ? p : null;
+  }
+  const suf = v.binSuffix || "";
+  for (const bin of fam(v.binStem)) {
+    const p = path.join(prefix, "bin", bin + suf);
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+const variantOf = (slot, id) => (bySlot[slot].variants || []).find((v) => v.id === id);
+
+function loadReg() { try { return JSON.parse(fs.readFileSync(REG, "utf8")); } catch (_) { return {}; } }
+function saveReg(r) { fs.mkdirSync(AOWL_HOME, { recursive: true }); fs.writeFileSync(REG, JSON.stringify(r, null, 2) + "\n"); }
+function reg() { const r = loadReg(); r.profile = r.profile || DEFAULT_PROFILE; r.overrides = r.overrides || {}; r.links = r.links || {}; return r; }
+
+// The active profile: an ephemeral AOWL_PROFILE (from `+profile` syntax) wins over
+// the stored selection — a clean, non-mutating one-shot override (rustup `+toolchain`).
+function activeProfile(r = reg()) {
+  const e = process.env.AOWL_PROFILE;
+  if (e && PROFILES[e]) return e;
+  return (r && r.profile) || DEFAULT_PROFILE;
+}
+const profileIsEphemeral = () => !!(process.env.AOWL_PROFILE && PROFILES[process.env.AOWL_PROFILE]);
+function activeVariantId(slot, r = reg()) {
+  if (process.env["AOWL_" + slot.toUpperCase()]) return "(env)";
+  // an ephemeral +profile ignores stored per-slot overrides for a clean stack
+  if (!profileIsEphemeral() && r.overrides[slot]) return r.overrides[slot];
+  const p = PROFILES[activeProfile(r)] || PROFILES[DEFAULT_PROFILE];
+  return p[slot] || (bySlot[slot].variants[0] || {}).id;
+}
+function resolve(slot, r = reg()) {
+  const s = bySlot[slot];
+  if (!s) return null;
+  const env = process.env["AOWL_" + slot.toUpperCase()];
+  if (env && fs.existsSync(env)) return { slot, variantId: "(env)", origin: "env", bin: env, source: "env" };
+  const id = activeVariantId(slot, r);
+  const v = variantOf(slot, id);
+  if (!v) return null;
+  const link = r.links[slot + "/" + id];
+  if (link && link.prefix) { const bin = binUnder(v, link.prefix); if (bin) return { slot, variantId: id, origin: v.origin, bin, source: "link" }; }
+  const bin = probeVariant(v);
+  if (bin) return { slot, variantId: id, origin: v.origin, bin, source: "dev-fallback" };
+  return { slot, variantId: id, origin: v.origin, bin: null, source: "missing" };
+}
+function binToRepo(bin) {
+  let d = path.dirname(bin);
+  if (path.basename(d) === "bin") return path.dirname(d);
+  if (path.basename(path.dirname(d)) === "nimcache") return path.dirname(path.dirname(d));
+  return path.dirname(d);
+}
+
+// ---- git / GitHub -----------------------------------------------------------
+function git(dir, args) { const r = cp.spawnSync("git", ["-C", dir, ...args], { encoding: "utf8" }); return r.status === 0 ? (r.stdout || "").trim() : null; }
+function ghSlug(url) { if (!url) return null; const m = url.match(/github\.com[:/]+([^/]+)\/(.+?)(?:\.git)?\/?$/); return m ? m[1] + "/" + m[2] : null; }
+function ghCompare(dir) {
+  const head = git(dir, ["rev-parse", "HEAD"]);
+  const branch = git(dir, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  const slug = ghSlug(git(dir, ["remote", "get-url", "origin"]));
+  if (!head || !branch || !slug) return { error: "no-git" };
+  const api = `https://api.github.com/repos/${slug}/compare/${branch}...${head}`;
+  const r = cp.spawnSync("curl", ["-sSL", "-m", "8", "-H", "Accept: application/vnd.github+json", api], { encoding: "utf8" });
+  if (r.status !== 0 || !r.stdout) return { error: "offline", slug, branch, head: head.slice(0, 7) };
+  let j; try { j = JSON.parse(r.stdout); } catch (_) { return { error: "bad-json", slug, branch, head: head.slice(0, 7) }; }
+  if (j.message) return { error: j.message === "Not Found" ? "unpushed" : j.message, slug, branch, head: head.slice(0, 7) };
+  return { slug, branch, head: head.slice(0, 7), status: j.status, behind: j.behind_by, ahead: j.ahead_by };
+}
+
+function manifest(s, v, bin) {
+  return { slot: s.slot, kind: s.kind, variant: v.id, origin: v.origin, target: s.target || null,
+    consumes: s.consumes, produces: s.produces || null, runner: s.runner || null, exe: bin,
+    modes: s.modes || null, defaultMode: s.defaultMode || (s.modes && s.modes[0]) || null,
+    flags: s.flags || [], needs: s.needs || [], cfgKey: s.cfgKey || null, abi: "aif27", note: s.note };
+}
+function writeManifest(s, r) {
+  const res = resolve(s.slot, r);
+  const v = variantOf(s.slot, res && res.variantId) || s.variants[0];
+  const dir = path.join(AOWL_HOME, "backends", s.slot);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "backend.json"), JSON.stringify(manifest(s, v, res && res.bin), null, 2) + "\n");
+}
+
+// ================================ commands ===================================
+function cmdInit() {
+  for (const d of ["bin", "backends", "toolchains", "pkg", "index", "cache"]) fs.mkdirSync(path.join(AOWL_HOME, d), { recursive: true });
+  const r = reg();
+  let found = 0;
+  for (const s of SLOTS) {
+    for (const v of s.variants) {
+      const bin = probeVariant(v);
+      if (!bin) continue;
+      r.links[s.slot + "/" + v.id] = { prefix: binToRepo(bin), version: "0.1.0" };
+      found++;
+    }
+    writeManifest(s, r);
+  }
+  saveReg(r);
+  process.stdout.write(banner("aoughwl toolchain manager"));
+  console.log(kv("home", C.cyan(AOWL_HOME.replace(HOME, "~"))));
+  console.log(kv("profile", pill(r.profile, (x) => C.bold(C.violet(x)))));
+  console.log(kv("found", C.green(found + " variants") + C.dim(" across " + SLOTS.length + " slots")));
+  console.log("");
+  console.log("  " + C.gray("add to PATH →") + "  " + C.cyan('export PATH="' + path.join(AOWL_HOME, "bin") + ':$PATH"'));
+  console.log("  " + C.gray("next →") + "         " + C.teal(PROG + " doctor") + C.dim("   (see the resolved stack)"));
+  console.log("");
+}
+
+function srcTag(src) {
+  return { link: C.green, "dev-fallback": C.amber, env: C.violet, missing: C.red }[src] || C.gray;
+}
+function cmdDoctor() {
+  const r = reg();
+  process.stdout.write(banner("resolved toolchain"));
+  const ovr = profileIsEphemeral() ? [] : Object.entries(r.overrides);
+  console.log(kv("profile", pill(activeProfile(r), (x) => C.bold(C.violet(x))) +
+    (profileIsEphemeral() ? C.dim("  (+ephemeral)") : "") +
+    (ovr.length ? "  " + C.gray("overrides: ") + ovr.map(([k, v]) => C.amber(k + "=" + v)).join(C.dim(", ")) : "")));
+  console.log(kv("home", C.cyan(AOWL_HOME.replace(HOME, "~")) + (fs.existsSync(REG) ? "" : C.red("  (run `" + PROG + " init`)"))));
+  console.log("");
+  const rows = SLOTS.map((s) => {
+    const res = resolve(s.slot, r);
+    const alt = s.variants.length > 1;
+    const variantCell = alt
+      ? s.variants.map((v) => v.id === res.variantId ? C.bold(C.teal(v.id)) : C.dim(v.id)).join(C.dim("/"))
+      : (res.bin ? C.teal(res.variantId) : C.dim(res.variantId));
+    const bin = res && res.bin ? C.cyan(res.bin.replace(HOME, "~")) : C.red(G.cross + " not built");
+    const kindC = s.kind === "backend" ? C.violet(s.kind) : s.kind === "tool" ? C.amber(s.kind) : C.gray(s.kind);
+    return [C.bold(C.white(s.slot)), kindC, variantCell, srcTag(res.source)(res.source), bin];
+  });
+  console.log(table([{ title: "slot" }, { title: "kind" }, { title: "variant" }, { title: "source" }, { title: "resolved" }], rows));
+  const targets = SLOTS.filter((s) => s.kind === "backend" && resolve(s.slot, r).bin).map((s) => s.target);
+  console.log("");
+  console.log("  " + C.gray("targets ") + G.arrow + " " + targets.map((t) => C.green(t)).join(C.dim(" · ")));
+  console.log("");
+}
+
+function cmdProfile(sub, name) {
+  const r = reg();
+  if (!sub || sub === "list" || sub === "show") {
+    process.stdout.write(banner("stack profiles"));
+    for (const [pn, map] of Object.entries(PROFILES)) {
+      const on = pn === r.profile;
+      const mark = on ? C.teal(G.dot) : C.dim(G.ring);
+      const nameC = on ? C.bold(C.violet(pn)) : C.gray(pn);
+      const trip = ["parser", "sem", "hexer"].map((k) => {
+        const ours = map[k] === PROFILES.aowl[k];
+        return C.gray(k + "=") + (ours ? C.teal(map[k]) : C.amber(map[k]));
+      }).join(C.dim("  "));
+      console.log("  " + mark + " " + padE(nameC, 8) + "  " + trip);
+    }
+    console.log("");
+    console.log("  " + C.dim("switch: ") + C.teal(PROG + " profile use <name>") + C.dim("   ·   one slot: ") + C.teal(PROG + " use <slot> <variant>"));
+    console.log("");
+    return;
+  }
+  if (sub === "use") {
+    if (!PROFILES[name]) die("unknown profile '" + name + "'. Known: " + Object.keys(PROFILES).join(", "));
+    r.profile = name; saveReg(r);
+    for (const s of SLOTS) writeManifest(s, r);
+    console.log("  " + C.green(G.ok) + " profile " + G.arrow + " " + C.bold(C.violet(name)));
+    return cmdDoctor();
+  }
+  die("profile subcommands: list | use <name>");
+}
+
+function cmdUse(slot, variant) {
+  const s = bySlot[slot];
+  if (!s) die("unknown slot '" + slot + "'. Slots: " + SLOTS.map((x) => x.slot).join(", "));
+  if (!variant) die("usage: " + PROG + " use <slot> <variant>   variants: " + s.variants.map((v) => v.id).join(", "));
+  if (!variantOf(slot, variant)) die("slot '" + slot + "' has no variant '" + variant + "'. Have: " + s.variants.map((v) => v.id).join(", "));
+  const r = reg(); r.overrides[slot] = variant; saveReg(r); writeManifest(s, r);
+  const res = resolve(slot, r);
+  console.log("  " + C.green(G.ok) + " " + C.bold(slot) + " " + G.arrow + " " + C.teal(variant) +
+    (res.bin ? C.dim("  " + res.bin.replace(HOME, "~")) : C.red("  " + G.cross + " not built")));
+}
+function cmdUnset(slot) {
+  const r = reg(); if (!r.overrides[slot]) return console.log("  " + C.gray("no override on '" + slot + "'"));
+  delete r.overrides[slot]; saveReg(r); writeManifest(bySlot[slot], r);
+  console.log("  " + C.green(G.ok) + " " + C.bold(slot) + " " + G.arrow + " profile default " + C.dim("(" + activeVariantId(slot, r) + ")"));
+}
+
+function cmdLink(slot, repo) {
+  const s = bySlot[slot];
+  if (!s) die("unknown slot '" + slot + "'. Slots: " + SLOTS.map((x) => x.slot).join(", "));
+  if (!repo) die("usage: " + PROG + " backend link <slot> <repo-dir>");
+  const abs = path.resolve(repo);
+  if (!fs.existsSync(abs)) die("no such repo dir: " + abs);
+  let linked = null;
+  for (const v of s.variants) { const bin = binUnder(v, abs); if (bin) { linked = { v, bin }; break; } }
+  if (!linked) die("no known variant bin under " + abs + " — build it first");
+  const r = reg(); r.links[slot + "/" + linked.v.id] = { prefix: abs, version: "0.1.0" };
+  if (r.overrides[slot] === undefined && activeVariantId(slot, r) !== linked.v.id) r.overrides[slot] = linked.v.id;
+  saveReg(r); writeManifest(s, r);
+  console.log("  " + C.green(G.ok) + " linked " + C.bold(slot + "/" + linked.v.id) + " " + G.arrow + " " + C.cyan(abs.replace(HOME, "~")));
+}
+function cmdWhich(slot) {
+  const res = resolve(slot);
+  if (!res || !res.bin) die("could not resolve '" + slot + "' — try `" + PROG + " backend link " + slot + " <repo>`");
+  console.log(res.bin); // raw: consumed by scripts
+}
+function cmdList() {
+  const r = reg();
+  const keys = Object.keys(r.links);
+  if (!keys.length) return console.log("  " + C.gray("nothing registered — run `" + PROG + " init`"));
+  process.stdout.write(banner("registered variants"));
+  const rows = keys.sort().map((k) => [C.bold(k), C.cyan((r.links[k].prefix || "").replace(HOME, "~"))]);
+  console.log(table([{ title: "slot/variant" }, { title: "repo" }], rows));
+  console.log("");
+}
+
+function componentRepos(r = reg()) {
+  const seen = new Map();
+  for (const s of SLOTS) {
+    const res = resolve(s.slot, r);
+    if (!res || !res.bin || res.source === "env") continue;
+    const link = r.links[s.slot + "/" + res.variantId];
+    const dir = (link && link.prefix) || binToRepo(res.bin);
+    if (!git(dir, ["rev-parse", "HEAD"])) continue;
+    if (!seen.has(dir)) seen.set(dir, { dir, slots: [] });
+    seen.get(dir).slots.push(s.slot);
+  }
+  return [...seen.values()];
+}
+
+function updateCell(cmp) {
+  if (cmp.error === "offline") return C.gray(G.bullet + " offline");
+  if (cmp.error === "unpushed") return C.gray(G.bullet + " local-only");
+  if (cmp.error) return C.gray(G.bullet + " " + cmp.error);
+  if (cmp.status === "identical") return C.green(G.ok + " up to date");
+  if (cmp.behind > 0) return C.amber(G.down + " " + cmp.behind + " behind") + (cmp.ahead ? C.dim(" / ") + C.violet(cmp.ahead + " ahead") : "");
+  if (cmp.ahead > 0) return C.violet(G.up + " " + cmp.ahead + " ahead");
+  return C.gray(cmp.status || "?");
+}
+function cmdStatus(json) {
+  const repos = componentRepos();
+  const rows = repos.map((rp) => {
+    let branch = git(rp.dir, ["rev-parse", "--abbrev-ref", "HEAD"]);
+    if (branch && branch.length > 18) branch = branch.slice(0, 17) + "…";
+    const rev = git(rp.dir, ["rev-parse", "--short", "HEAD"]);
+    const dirty = git(rp.dir, ["status", "--porcelain"]) ? "*" : "";
+    const cmp = ghCompare(rp.dir);
+    return { dir: rp.dir.replace(HOME, "~"), slots: rp.slots, branch, rev: rev + dirty, dirty: !!dirty, cmp };
+  });
+  if (json) return console.log(JSON.stringify(rows, null, 2));
+  process.stdout.write(banner("component versions " + C.dim("(vs GitHub)")));
+  const trows = rows.map((r) => [
+    C.bold(C.white(r.dir)),
+    C.gray(r.branch || "-"),
+    (r.dirty ? C.amber : C.cyan)(r.rev || "-"),
+    C.dim(r.cmp.slug || "?"),
+    updateCell(r.cmp),
+  ]);
+  console.log(table([{ title: "repo" }, { title: "branch" }, { title: "rev" }, { title: "github" }, { title: "update" }], trows));
+  const nim = rows.find((x) => /nimony$/.test(x.dir));
+  console.log("");
+  console.log("  " + C.gray(repos.length + " repos") + C.dim("   ·   ") + C.amber(G.down + " behind") + C.gray(" = ") + C.teal(PROG + " update <repo>") +
+    (nim ? C.dim("   ·   ") + C.gray("nimony passes track ") + C.cyan(nim.branch) : ""));
+  console.log("");
+}
+
+function reposForName(name, r = reg()) {
+  const all = componentRepos(r);
+  if (!name || name === "all") return all;
+  return all.filter((rp) => rp.slots.includes(name) || path.basename(rp.dir) === name ||
+    path.basename(rp.dir).replace(/^(aif|nif)/, "aowl") === name);
+}
+function cmdUpdate(name, yes) {
+  const repos = reposForName(name);
+  if (!repos.length) die("no component repo matches '" + (name || "") + "' — see `" + PROG + " status`");
+  process.stdout.write(banner(yes ? "pulling updates" : "update check"));
+  for (const rp of repos) {
+    const cmp = ghCompare(rp.dir);
+    const tag = C.bold(rp.dir.replace(HOME, "~")) + C.dim(" [" + rp.slots.join(",") + "]");
+    if (cmp.error && cmp.error !== "unpushed") { console.log("  " + C.gray(G.bullet) + " " + tag + " " + C.gray(cmp.error)); continue; }
+    const behind = cmp.behind || 0;
+    if (!behind) { console.log("  " + C.green(G.ok) + " " + tag + " " + C.green("up to date")); continue; }
+    if (!yes) { console.log("  " + C.amber(G.down) + " " + tag + " " + C.amber(behind + " behind ") + C.dim(cmp.branch) + " " + G.arrow + " " + C.teal(PROG + " update " + path.basename(rp.dir) + " --yes")); continue; }
+    if (git(rp.dir, ["status", "--porcelain"])) { console.log("  " + C.amber(G.warn) + " " + tag + " " + C.amber("working tree dirty — skipped")); continue; }
+    console.log("  " + C.amber(G.down) + " " + tag + " " + C.gray("pulling " + behind + "…"));
+    const pr = cp.spawnSync("git", ["-C", rp.dir, "pull", "--ff-only"], { stdio: "inherit" });
+    console.log(pr.status === 0 ? "    " + C.green(G.ok + " pulled") + C.dim("  → aowl build " + path.basename(rp.dir) + " --yes") : "    " + C.red(G.cross + " pull failed (not fast-forward?)"));
+  }
+  console.log("");
+}
+
+// A classic Nim to bootstrap nimony's hastur. Prefer a clean devel Nim — ~/Nim
+// carries JS copy-elision patches that miscompile nimony's runtime (per
+// nimony/rebuild-devel.sh) — then fall back to whatever `nim` is on PATH.
+function findNim() {
+  const c = [path.join(HOME, ".choosenim/toolchains/nim-#devel/bin/nim"),
+             path.join(HOME, ".nimble/bin/nim"), path.join(HOME, "Nim/bin/nim")];
+  for (const p of c) if (fs.existsSync(p)) return p;
+  return "nim";
+}
+function buildRecipe(dir) {
+  const base = path.basename(dir);
+  if (/nimony/.test(base)) {
+    const hastur = path.join(dir, "bin", "hastur");
+    // incremental if hastur is already built; else the canonical from-scratch
+    // bootstrap: classic Nim compiles hastur AND builds the whole toolchain.
+    if (fs.existsSync(hastur)) return { cmd: hastur, args: ["build", "all"], cwd: dir, hint: "hastur build all" };
+    return { cmd: findNim(), args: ["c", "-r", "src/hastur", "build", "all"], cwd: dir, hint: "nim c -r src/hastur build all" };
+  }
+  if (fs.existsSync(path.join(dir, "build.sh"))) return { cmd: "bash", args: ["build.sh"], cwd: dir, hint: "./build.sh" };
+  if (fs.existsSync(path.join(dir, "Makefile"))) return { cmd: "make", args: [], cwd: dir, hint: "make" };
+  return null; // node-based components ship bin/ — no build step
+}
+function cmdBuild(name, yes) {
+  const repos = reposForName(name);
+  if (!repos.length) die("no component repo matches '" + (name || "") + "' — see `" + PROG + " status`");
+  process.stdout.write(banner(yes ? "building from source" : "build plan"));
+  for (const rp of repos) {
+    const rec = buildRecipe(rp.dir);
+    const tag = C.bold(rp.dir.replace(HOME, "~"));
+    if (!rec) { console.log("  " + C.gray("? ") + tag + C.gray("  no build recipe (hastur/build.sh/Makefile)")); continue; }
+    if (rec.cmd.includes("/") && !fs.existsSync(rec.cmd)) { console.log("  " + C.gray("? ") + tag + C.gray("  " + rec.hint + " not present")); continue; }
+    if (!yes) { console.log("  " + C.violet(G.gear) + " " + tag + " " + C.gray("would run ") + C.teal(rec.hint) + C.dim("  (add --yes)")); continue; }
+    console.log("  " + C.violet(G.gear) + " " + tag + " " + C.teal(rec.hint) + C.gray(" …"));
+    const br = cp.spawnSync(rec.cmd, rec.args, { cwd: rec.cwd, stdio: "inherit" });
+    console.log(br.status === 0 ? "    " + C.green(G.ok + " built") : "    " + C.red(G.cross + " exited " + br.status));
+  }
+  console.log("");
+}
+
+function cmdConfig(lsp) {
+  const r = reg();
+  const opts = {};
+  for (const s of SLOTS) { if (!s.cfgKey) continue; const res = resolve(s.slot, r); if (res && res.bin) opts[s.cfgKey] = res.bin; }
+  for (const slot of ["parser", "sem", "hexer"]) { const res = resolve(slot, r); if (res && res.bin) opts[slot + "Exe"] = res.bin; }
+  // resolved backend bins too, so the aowlmony driver can consume one payload
+  const slots = {};
+  for (const s of SLOTS) { const res = resolve(s.slot, r); if (res) slots[s.slot] = { variant: res.variantId, origin: res.origin, exe: res.bin }; }
+  opts.profile = activeProfile(r);
+  const payload = lsp ? { initializationOptions: opts } : Object.assign({}, opts, { slots });
+  console.log(JSON.stringify(payload, null, 2)); // raw JSON: machine-consumed
+}
+
+// --- setup: bootstrap the whole toolchain on a fresh machine -----------------
+// The aoughwl components (one per repoStem) + nimony, which must be built FIRST
+// because it is the compiler that builds all the others. There is no prebuilt
+// nimony binary, so `setup` clones + builds from source — deliberately.
+function setupComponents() {
+  const seen = new Set(), out = [];
+  for (const s of SLOTS) for (const v of s.variants) {
+    if (v.origin !== "aoughwl" || seen.has(v.repoStem)) continue;
+    seen.add(v.repoStem);
+    out.push({ name: "aowl" + v.repoStem, slug: "aoughwl/aowl" + v.repoStem,
+      dir: path.join(HOME, "aowl" + v.repoStem), stem: v.repoStem });
+  }
+  return out;
+}
+function hasBuiltBin(dir) { try { return fs.readdirSync(path.join(dir, "bin")).some((f) => !f.startsWith(".")); } catch (_) { return false; } }
+// A component is "ready" if a built bin exists at its canonical dir OR any dir in
+// the aowl/aif/nif rename family (current dev checkouts still sit at ~/aif*).
+function readyDir(c) {
+  const cands = c.stem ? fam(c.stem).map((r) => path.join(HOME, r)) : [c.dir];
+  for (const d of cands) if (hasBuiltBin(d)) return d;
+  return null;
+}
+function cmdSetup(yes) {
+  process.stdout.write(banner(yes ? "installing the toolchain" : "setup plan  " + C.dim("(add --yes to execute)")));
+  const comps = [
+    { name: "nimony", slug: "nim-lang/nimony", dir: path.join(HOME, "nimony"), first: true },
+    ...setupComponents(),
+  ];
+  let clone = 0, build = 0, ready = 0;
+  for (const c of comps) {
+    const tag = C.bold(C.white(c.name)) + C.dim("  " + c.slug) + (c.first ? C.violet("  ← bootstrap compiler") : "");
+    const hasDir = fs.existsSync(c.dir);
+    const rdir = c.first ? (hasBuiltBin(c.dir) ? c.dir : null) : readyDir(c);
+    if (rdir) { console.log("  " + C.green(G.ok) + " " + tag + " " + C.green("ready") +
+      (rdir !== c.dir ? C.dim("  " + rdir.replace(HOME, "~")) : "")); ready++; continue; }
+    if (!hasDir) {
+      clone++; build++;
+      console.log("  " + C.amber("↓") + " " + tag + C.gray("  clone → " + c.dir.replace(HOME, "~") + " + build"));
+      if (yes) {
+        const cr = cp.spawnSync("git", ["clone", "https://github.com/" + c.slug + ".git", c.dir], { stdio: "inherit" });
+        if (cr.status !== 0) { console.log("    " + C.red(G.cross + " clone failed")); continue; }
+      }
+    } else { build++; console.log("  " + C.violet(G.gear) + " " + tag + C.gray("  present, needs build")); }
+    if (yes && hasBuiltBin(c.dir)) { console.log("    " + C.green(G.ok + " ready") + C.dim(" (ships bin/, no build)")); continue; }
+    if (yes) {
+      const rec = buildRecipe(c.dir);
+      if (!rec || (rec.cmd.includes("/") && !fs.existsSync(rec.cmd))) {
+        console.log("    " + C.amber(G.warn) + C.gray(" no runnable build recipe yet — build " + c.name + " manually" +
+          (c.first ? " (nimony bootstraps via its own toolchain; see its README)" : "")));
+        continue;
+      }
+      console.log("    " + C.violet(G.gear) + " " + C.teal(rec.hint) + C.gray(" …"));
+      const br = cp.spawnSync(rec.cmd, rec.args, { cwd: rec.cwd, stdio: "inherit" });
+      console.log(br.status === 0 ? "    " + C.green(G.ok + " built") : "    " + C.red(G.cross + " build exited " + br.status));
+    }
+  }
+  console.log("");
+  if (!yes) console.log("  " + C.gray(ready + " ready, " + clone + " to clone, " + build + " to build") +
+    C.dim("   ·   ") + C.teal(PROG + " setup --yes") + C.dim(" to execute"));
+  else { console.log("  " + C.gray("re-registering…")); cmdInit(); }
+  console.log("");
+}
+
+// --- vscode: wire the nimony VS Code extension to the active profile ----------
+// The extension (publisher.name = `nimony.nimony`, source ~/nimony-lsp/client)
+// reads `nimony.serverPath` (the LSP server binary) and `nimony.nimonyPath` (the
+// compiler). We point serverPath at the resolved aowllsp — our nimony-native LSP
+// server — so the editor tracks whatever profile is active.
+function cmdVscode(dir, yes) {
+  const r = reg();
+  const lsp = resolve("lsp", r);
+  const nimonyBin = path.join(HOME, "nimony", "bin", "nimony");
+  const hasNimony = fs.existsSync(nimonyBin);
+  const settings = {
+    "nimony.serverPath": lsp && lsp.bin ? lsp.bin : "",
+    "nimony.nimonyPath": hasNimony ? nimonyBin : "",
+  };
+  process.stdout.write(banner("editor / LSP wiring  " + C.dim("(nimony extension · profile " + activeProfile(r) + ")")));
+  console.log(kv("server", lsp && lsp.bin ? C.cyan(lsp.bin.replace(HOME, "~")) : C.red(G.cross + " aowllsp not built — run `" + PROG + " setup`")));
+  console.log(kv("nimony", hasNimony ? C.cyan(nimonyBin.replace(HOME, "~")) : C.red(G.cross + " nimony not built")));
+  console.log(kv("ext", C.gray("nimony.nimony") + C.dim("  (~/nimony-lsp/client)")));
+  const target = dir ? path.resolve(dir) : process.cwd();
+  const sp = path.join(target, ".vscode", "settings.json");
+  if (!yes) {
+    console.log("");
+    console.log("  " + C.gray("would merge into ") + C.cyan(sp.replace(HOME, "~")) + C.dim("   (add --yes)"));
+    for (const [k, v] of Object.entries(settings)) console.log("    " + C.teal(k) + C.dim(": ") + C.gray(v || "(unset)"));
+    console.log("");
+    return;
+  }
+  // Never clobber a settings.json we can't parse (it may hold comments / the
+  // user's config) — merge only into clean JSON, else print keys to add by hand.
+  let existing = {};
+  if (fs.existsSync(sp)) {
+    try { existing = JSON.parse(fs.readFileSync(sp, "utf8")); }
+    catch (_) {
+      console.log("  " + C.amber(G.warn) + " " + C.gray(sp.replace(HOME, "~") + " isn't plain JSON — add these keys yourself:"));
+      for (const [k, v] of Object.entries(settings)) console.log("    " + C.teal('"' + k + '"') + C.dim(": ") + C.cyan('"' + v + '"'));
+      console.log("");
+      return;
+    }
+  }
+  fs.mkdirSync(path.dirname(sp), { recursive: true });
+  fs.writeFileSync(sp, JSON.stringify(Object.assign(existing, settings), null, 2) + "\n");
+  console.log("  " + C.green(G.ok) + " wrote " + C.cyan(sp.replace(HOME, "~")) +
+    C.dim("   (nimony extension now uses the " + activeProfile(r) + " LSP)"));
+  console.log("");
+}
+
+function die(m) { console.error("  " + (COLOR ? C.red(G.cross) : "x") + " " + C.red(m)); process.exit(1); }
+function help() {
+  process.stdout.write(banner("aoughwl toolchain manager"));
+  const rows = [
+    ["setup [--yes]", "clone + build the whole toolchain (fresh machine)"],
+    ["doctor", "resolved toolchain for the active profile"],
+    ["profile [use N]", "show / switch the whole-stack profile"],
+    ["use SLOT VAR", "override one slot (e.g. use sem nimsem)"],
+    ["unset SLOT", "drop a slot override"],
+    ["status", "git rev + GitHub update check per component"],
+    ["update [N] --yes", "pull updates (check-only without --yes)"],
+    ["rebuild N --yes", "rebuild a component from source"],
+    ["vscode [DIR] --yes", "wire the editor/LSP to the active profile"],
+    ["config [--lsp]", "emit editor initializationOptions"],
+    ["backend link S R", "register a working repo for slot S"],
+    ["which SLOT", "print the resolved exe (raw)"],
+  ];
+  console.log(table([{ title: "command" }, { title: "" }], rows.map(([a, b]) => [C.teal(a), C.gray(b)])));
+  console.log("");
+  console.log("  " + C.dim("profiles: ") + Object.keys(PROFILES).map((p) => p === DEFAULT_PROFILE ? C.violet(p) + C.dim("*") : C.gray(p)).join(C.dim(" · ")) +
+    C.dim("   ·   one-shot: ") + C.teal(PROG + " +nimony doctor"));
+  console.log("  " + C.gray("compile code with ") + C.teal("aowlmony run <file>") + C.dim("   — aowlup manages the toolchain, aowlmony uses it (rustup : cargo)"));
+  console.log("");
+}
+function flag(argv, name) { const i = argv.indexOf(name); if (i >= 0) argv.splice(i, 1); return i >= 0; }
+
+function main() {
+  const argv = process.argv.slice(2);
+  // `+profile` (rustup-style) = ephemeral profile for this one invocation
+  if (argv[0] && argv[0][0] === "+") {
+    const p = argv.shift().slice(1);
+    if (!PROFILES[p]) die("unknown profile '+" + p + "'. Known: " + Object.keys(PROFILES).join(", "));
+    process.env.AOWL_PROFILE = p;
+  }
+  const json = flag(argv, "--json"), lsp = flag(argv, "--lsp"), yes = flag(argv, "--yes");
+  flag(argv, "--check");
+  const [cmd, a, b] = argv;
+  switch (cmd) {
+    case undefined: case "-h": case "--help": case "help": return help();
+    case "init": return cmdInit();
+    case "setup": return cmdSetup(yes);
+    case "doctor": case "dr": return cmdDoctor();
+    case "profile": case "p": return cmdProfile(a, b);
+    case "use": return cmdUse(a, b);
+    case "unset": return cmdUnset(a);
+    case "vscode": return cmdVscode(a, yes);
+    case "backend": case "b":
+      if (a === "list") return cmdList();
+      if (a === "link") return cmdLink(b, argv[3]);
+      if (a === "which") return cmdWhich(b);
+      return die("backend subcommands: list | link <slot> <repo> | which <slot>");
+    case "which": return cmdWhich(a);
+    case "list": return cmdList();
+    case "status": case "st": return cmdStatus(json);
+    case "update": case "up": return cmdUpdate(a, yes);
+    case "rebuild": case "build": return cmdBuild(a, yes);
+    case "config": return cmdConfig(lsp);
+    default: return die("unknown command '" + cmd + "'. Try `" + PROG + " help`.");
+  }
+}
+try { main(); } catch (e) { die((e && e.stack) || String(e)); }

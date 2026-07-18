@@ -1,0 +1,11 @@
+{
+  "name": "aowlup",
+  "version": "0.1.0",
+  "description": "The aoughwl toolchain manager — rustup for the aowl/nimony stack. Installs, versions, and selects the pipeline components (parser/sem/hexer/backends/LSP) behind one registry; aowlmony compiles against it.",
+  "keywords": ["aowl", "aoughwl", "nimony", "toolchain", "version-manager", "rustup"],
+  "bin": { "aowlup": "bin/aowlup" },
+  "scripts": { "test": "node test/test.js" },
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/aoughwl/aowlup.git" },
+  "homepage": "https://aoughwl.github.io/docs/aowlup"
+}
