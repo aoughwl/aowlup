@@ -642,9 +642,67 @@ function cmdVscode(dir, yes) {
 }
 
 function die(m) { console.error("  " + (COLOR ? C.red(G.cross) : "x") + " " + C.red(m)); process.exit(1); }
+// A file is an exported aoughwl PACK (not source) when its first non-blank,
+// non-comment line is the `aowl-pack` header. Packs are RUN by reduction
+// (cssask), not compiled.
+function looksLikePack(file) {
+  try {
+    const txt = fs.readFileSync(file, "utf8");
+    for (const raw of txt.split("\n")) {
+      const line = raw.trim();
+      if (!line || line[0] === "#") continue;
+      return line.indexOf("aowl-pack") === 0;
+    }
+  } catch (_) {}
+  return false;
+}
+
+// The pack reducer. It lives beside the pack in the aoughwl bridges dir; also
+// try the canonical checkout so F6 works on a copy elsewhere.
+function findCssask(file) {
+  const cands = [
+    path.join(path.dirname(file), "cssask"),
+    path.join(HOME, "aoughwl", "bridges", "nifi", "cssask"),
+  ];
+  for (const c of cands) if (fs.existsSync(c) && (fs.statSync(c).mode & 0o111)) return c;
+  return null;
+}
+
+// `aowl run <file>` — run a pack by reduction, or hand a source file to aowlmony.
+// This is what the editor's F6 calls, so it must Just Work on a `.aowl` pack.
+function cmdRun(file, rest) {
+  if (!file) die("usage: " + PROG + " run <file> [args...]");
+  const abs = path.resolve(file);
+  if (!fs.existsSync(abs)) die("run: no such file: " + abs);
+  if (looksLikePack(abs)) {
+    const ask = findCssask(abs);
+    if (!ask) die("run: '" + path.basename(abs) + "' is an aowl pack but no `cssask` runner was found (looked beside it and in ~/aoughwl/bridges/nifi)");
+    const args = rest && rest.length ? [abs].concat(rest) : [abs];
+    const r = cp.spawnSync(ask, args, { stdio: "inherit" });
+    process.exit(r.status === null ? 1 : r.status);
+  }
+  // Not a pack: it is source. Compile+run it through aowlmony (the driver that
+  // consumes the toolchain aowlup manages — rustup : cargo).
+  const mony = findOnPath("aowlmony") || path.join(HOME, "aowlmony", "bin", "aowlmony");
+  if (!fs.existsSync(mony)) die("run: not a pack, and no `aowlmony` found to compile source. Use `aowlmony run " + path.basename(abs) + "`.");
+  const r = cp.spawnSync(mony, ["run", abs].concat(rest || []), { stdio: "inherit" });
+  process.exit(r.status === null ? 1 : r.status);
+}
+
+function findOnPath(name) {
+  const dirs = (process.env.PATH || "").split(path.delimiter);
+  for (const d of dirs) {
+    if (!d) continue;
+    const p = path.join(d, name);
+    try { if (fs.existsSync(p) && (fs.statSync(p).mode & 0o111)) return p; } catch (_) {}
+  }
+  return null;
+}
+
 function help() {
   process.stdout.write(banner("aoughwl toolchain manager"));
   const rows = [
+    ["run FILE [args]", "run an aowl pack by reduction, or compile+run source"],
     ["setup [--yes]", "clone + build the whole toolchain (fresh machine)"],
     ["doctor", "resolved toolchain for the active profile"],
     ["profile [use N]", "show / switch the whole-stack profile"],
@@ -692,6 +750,7 @@ function main() {
       if (a === "link") return cmdLink(b, argv[3]);
       if (a === "which") return cmdWhich(b);
       return die("backend subcommands: list | link <slot> <repo> | which <slot>");
+    case "run": return cmdRun(a, argv.slice(2));
     case "which": return cmdWhich(a);
     case "list": return cmdList();
     case "status": case "st": return cmdStatus(json);
