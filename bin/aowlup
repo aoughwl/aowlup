@@ -17,6 +17,8 @@
 //
 // Commands:
 //   aowl init                      create ~/.aowl, auto-discover + register everything
+//   aowl install [NAME]            install a private-source backend from its public
+//                                  GitHub release (aowli: interp + dbg binaries)
 //   aowl doctor                    full resolution table for the ACTIVE profile
 //   aowl profile [list|use NAME]   show / switch the whole-stack profile
 //   aowl use SLOT VARIANT          override one slot (e.g. `aowl use sem nimsem`)
@@ -112,12 +114,21 @@ const SLOTS = [
     variants: [{ id: "aowlc", origin: "aoughwl", repoStem: "c", binStem: "c" }],
     modes: ["emit", "build", "run", "exec"], defaultMode: "run", needs: ["gcc"],
     note: "node aowlc {mode} <f.c.nif>" },
+  // interp + dbg are PRIVATE-source aoughwl components: end users can't build
+  // aowli, they fetch the published hardened binaries. `releaseRepo`/`releaseAsset`
+  // mark a variant as installable from the public GitHub release (see cmdInstall).
   { slot: "interp", kind: "backend", target: "interp", consumes: ".s.nif",
-    variants: [{ id: "aowli-interp", origin: "aoughwl", repoStem: "i", binStem: "i", binSuffix: "-interp" }],
+    variants: [{ id: "aowli-interp", origin: "aoughwl", repoStem: "i", binStem: "i", binSuffix: "-interp",
+      releaseRepo: "aoughwl/aowli-release", releaseAsset: "aowli-interp" }],
     note: "aowli-interp <f.s.nif> (tree-walk)" },
   { slot: "vm", kind: "backend", target: "vm", consumes: ".s.nif",
+    // vm ships no release asset (unpublished) — stays link/local-build only.
     variants: [{ id: "aowli-vm", origin: "aoughwl", repoStem: "i", binStem: "i", binSuffix: "-vm" }],
     note: "aowli-vm <f.s.nif> (bytecode)" },
+  { slot: "dbg", kind: "tool", consumes: ".s.nif",
+    variants: [{ id: "aowli-dbg", origin: "aoughwl", repoStem: "i", binStem: "i", binSuffix: "-dbg",
+      releaseRepo: "aoughwl/aowli-release", releaseAsset: "aowli-dbg" }],
+    note: "aowli-dbg <f.s.nif> (batch breakpoints / trace)" },
   { slot: "js", kind: "backend", target: "js", consumes: ".s.nif", flags: ["--faithful"],
     variants: [{ id: "aowljs", origin: "aoughwl", repoStem: "js", binStem: "js" }],
     note: "aowljs [--faithful] <f.s.nif> → stdout" },
@@ -190,7 +201,7 @@ const variantOf = (slot, id) => (bySlot[slot].variants || []).find((v) => v.id =
 
 function loadReg() { try { return JSON.parse(fs.readFileSync(REG, "utf8")); } catch (_) { return {}; } }
 function saveReg(r) { fs.mkdirSync(AOWL_HOME, { recursive: true }); fs.writeFileSync(REG, JSON.stringify(r, null, 2) + "\n"); }
-function reg() { const r = loadReg(); r.profile = r.profile || DEFAULT_PROFILE; r.overrides = r.overrides || {}; r.links = r.links || {}; return r; }
+function reg() { const r = loadReg(); r.profile = r.profile || DEFAULT_PROFILE; r.overrides = r.overrides || {}; r.links = r.links || {}; r.components = r.components || {}; return r; }
 
 // The active profile: an ephemeral AOWL_PROFILE (from `+profile` syntax) wins over
 // the stored selection — a clean, non-mutating one-shot override (rustup `+toolchain`).
@@ -242,6 +253,80 @@ function ghCompare(dir) {
   let j; try { j = JSON.parse(r.stdout); } catch (_) { return { error: "bad-json", slug, branch, head: head.slice(0, 7) }; }
   if (j.message) return { error: j.message === "Not Found" ? "unpushed" : j.message, slug, branch, head: head.slice(0, 7) };
   return { slug, branch, head: head.slice(0, 7), status: j.status, behind: j.behind_by, ahead: j.ahead_by };
+}
+
+// ---- GitHub releases (public, unauthenticated) ------------------------------
+// PRIVATE-source components (aowli) can't be built by end users; they install the
+// hardened binaries published to a public release repo. No token is needed nor used.
+function ghLatestRelease(slug) {
+  const api = `https://api.github.com/repos/${slug}/releases/latest`;
+  const r = cp.spawnSync("curl", ["-sSL", "-m", "15", "-H", "Accept: application/vnd.github+json", api], { encoding: "utf8" });
+  if (r.status !== 0 || !r.stdout) return { error: "offline", slug };
+  let j; try { j = JSON.parse(r.stdout); } catch (_) { return { error: "bad-json", slug }; }
+  if (j.message) return { error: j.message, slug };
+  return { slug, tag: j.tag_name, assets: (j.assets || []).map((a) => ({ name: a.name, url: a.browser_download_url })) };
+}
+function downloadTo(url, dest) {
+  const r = cp.spawnSync("curl", ["-sSL", "-m", "180", "-o", dest, url], { stdio: ["ignore", "ignore", "inherit"] });
+  return r.status === 0 && fs.existsSync(dest);
+}
+// Every (slot, variant) that carries release metadata, optionally filtered by a
+// name: the variant id (aowli-interp), a slot (interp), or the family stem
+// (`aowli` → the whole aowli family: interp + dbg).
+function releaseTargets(name) {
+  const out = [];
+  for (const s of SLOTS) for (const v of s.variants) {
+    if (!v.releaseRepo || !v.releaseAsset) continue;
+    if (name && name !== "all") {
+      const fam2 = name === "aowli" && v.repoStem === "i";
+      if (name !== v.id && name !== s.slot && !fam2) continue;
+    }
+    out.push({ s, v });
+  }
+  return out;
+}
+// Install release binaries into ~/.aowl/toolchains/<variant>/<tag>/bin/<asset>
+// and point the registry component + link at them. Returns installed entries.
+function installRelease(name, r) {
+  const targets = releaseTargets(name);
+  if (!targets.length) die("no release-installable component matches '" + (name || "") + "'. Try `" + PROG + " install aowli`.");
+  const byRepo = new Map();
+  for (const t of targets) { if (!byRepo.has(t.v.releaseRepo)) byRepo.set(t.v.releaseRepo, []); byRepo.get(t.v.releaseRepo).push(t); }
+  const done = [];
+  for (const [slug, ts] of byRepo) {
+    const rel = ghLatestRelease(slug);
+    if (rel.error) { console.log("  " + C.red(G.cross) + " " + C.bold(slug) + " " + C.red(rel.error)); continue; }
+    console.log("  " + C.teal(G.down) + " " + C.bold(slug) + " " + C.gray("release ") + C.cyan(rel.tag) +
+      C.dim("  (" + rel.assets.length + " asset" + (rel.assets.length === 1 ? "" : "s") + ")"));
+    for (const { s, v } of ts) {
+      const asset = rel.assets.find((a) => a.name === v.releaseAsset);
+      if (!asset) { console.log("    " + C.gray(G.bullet) + " " + C.gray(v.releaseAsset + " — not in this release, skipped")); continue; }
+      const tcdir = path.join(AOWL_HOME, "toolchains", v.id, rel.tag);
+      const bindir = path.join(tcdir, "bin");
+      fs.mkdirSync(bindir, { recursive: true });
+      const dest = path.join(bindir, v.releaseAsset);
+      process.stdout.write("    " + C.violet(G.gear) + " " + C.teal(v.id) + C.gray(" ← " + asset.name + " …"));
+      if (!downloadTo(asset.url, dest)) { console.log(" " + C.red(G.cross + " download failed")); continue; }
+      fs.chmodSync(dest, 0o755);
+      r.components[s.slot] = { source: "release", release: slug, version: rel.tag, bin: dest, prefix: tcdir };
+      r.links[s.slot + "/" + v.id] = { prefix: tcdir, version: rel.tag, source: "release" };
+      writeManifest(s, r);
+      console.log(" " + C.green(G.ok) + C.dim("  " + dest.replace(HOME, "~")));
+      done.push({ slot: s.slot, tag: rel.tag, bin: dest });
+    }
+  }
+  return done;
+}
+function cmdInstall(name) {
+  process.stdout.write(banner("install from public release"));
+  const r = reg();
+  const done = installRelease(name || "aowli", r);
+  saveReg(r);
+  console.log("");
+  if (done.length) console.log("  " + C.green(G.ok + " installed " + done.length + " component" + (done.length === 1 ? "" : "s")) +
+    C.dim("   ·   ") + C.gray("check ") + C.teal(PROG + " status") + C.dim(" for release currency"));
+  else console.log("  " + C.gray("nothing installed"));
+  console.log("");
 }
 
 function manifest(s, v, bin) {
@@ -429,6 +514,27 @@ function cmdStatus(json) {
     updateCell(r.cmp),
   ]);
   console.log(table([{ title: "repo" }, { title: "branch" }, { title: "rev" }, { title: "github" }, { title: "update" }], trows));
+  // Release-installed (private-source) components: installed tag vs latest GitHub
+  // release. These are LICENCE-GATED and expire, so surfacing "behind latest" tells
+  // a user to re-run `install` when a build lapses.
+  const relTargets = releaseTargets("all");
+  if (relTargets.length) {
+    const rr = reg();
+    const relRows = relTargets.map(({ s, v }) => {
+      const cur = (rr.components[s.slot] || {}).version || null;
+      const rel = ghLatestRelease(v.releaseRepo);
+      let cell;
+      if (rel.error) cell = C.gray(G.bullet + " " + rel.error);
+      else if (!cur) cell = C.amber(G.down + " not installed → " + rel.tag);
+      else if (cur === rel.tag) cell = C.green(G.ok + " current");
+      else cell = C.amber(G.down + " " + cur + " → " + rel.tag);
+      return [C.bold(C.white(s.slot)), C.dim(v.id), C.cyan(cur || "-"), C.dim(v.releaseRepo), cell];
+    });
+    console.log("");
+    process.stdout.write(banner("release backends " + C.dim("(vs GitHub release · licence-gated)")));
+    console.log(table([{ title: "slot" }, { title: "variant" }, { title: "installed" }, { title: "release repo" }, { title: "status" }], relRows));
+    console.log("  " + C.dim("behind → ") + C.teal(PROG + " install aowli") + C.dim("   (hardened builds expire; re-install to refresh the licence gate)"));
+  }
   const nim = rows.find((x) => /nimony$/.test(x.dir));
   console.log("");
   console.log("  " + C.gray(repos.length + " repos") + C.dim("   ·   ") + C.amber(G.down + " behind") + C.gray(" = ") + C.teal(PROG + " update <repo>") +
@@ -443,6 +549,37 @@ function reposForName(name, r = reg()) {
     path.basename(rp.dir).replace(/^(aif|nif)/, "aowl") === name);
 }
 function cmdUpdate(name, yes) {
+  // Release-based (private-source) components update by re-fetching the public
+  // release, not by git-pull. Route those here before falling to the git path.
+  const relTargets = releaseTargets(name);
+  if (relTargets.length && !reposForName(name).length) {
+    process.stdout.write(banner(yes ? "updating from public release" : "release update check"));
+    const repos2 = new Map();
+    for (const { s, v } of relTargets) if (!repos2.has(v.releaseRepo)) repos2.set(v.releaseRepo, []);
+    if (!yes) {
+      const r = reg();
+      for (const [slug] of repos2) {
+        const rel = ghLatestRelease(slug);
+        const tag = C.bold(slug);
+        if (rel.error) { console.log("  " + C.gray(G.bullet) + " " + tag + " " + C.gray(rel.error)); continue; }
+        // per-slot installed version from the registry component
+        for (const { s, v } of relTargets.filter((t) => t.v.releaseRepo === slug)) {
+          const cur = (r.components[s.slot] || {}).version;
+          const same = cur === rel.tag;
+          console.log("  " + (same ? C.green(G.ok) : C.amber(G.down)) + " " + C.bold(s.slot) + C.dim("/" + v.id) + " " +
+            (cur ? C.gray("installed " + cur + " ") : C.gray("not installed ")) +
+            (same ? C.green("= latest " + rel.tag) : C.amber("→ latest " + rel.tag + "  ") + C.dim(PROG + " install " + (name || "aowli") + " --yes")));
+        }
+      }
+      console.log("");
+      return;
+    }
+    const r = reg();
+    installRelease(name || "aowli", r);
+    saveReg(r);
+    console.log("");
+    return;
+  }
   const repos = reposForName(name);
   if (!repos.length) die("no component repo matches '" + (name || "") + "' — see `" + PROG + " status`");
   process.stdout.write(banner(yes ? "pulling updates" : "update check"));
@@ -704,6 +841,7 @@ function help() {
   const rows = [
     ["run FILE [args]", "run an aowl pack by reduction, or compile+run source"],
     ["setup [--yes]", "clone + build the whole toolchain (fresh machine)"],
+    ["install [NAME]", "fetch a private-source backend from its public release (aowli)"],
     ["doctor", "resolved toolchain for the active profile"],
     ["profile [use N]", "show / switch the whole-stack profile"],
     ["use SLOT VAR", "override one slot (e.g. use sem nimsem)"],
@@ -740,6 +878,7 @@ function main() {
     case undefined: case "-h": case "--help": case "help": return help();
     case "init": return cmdInit();
     case "setup": return cmdSetup(yes);
+    case "install": case "i": return cmdInstall(a);
     case "doctor": case "dr": return cmdDoctor();
     case "profile": case "p": return cmdProfile(a, b);
     case "use": return cmdUse(a, b);
