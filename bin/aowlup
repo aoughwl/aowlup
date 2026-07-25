@@ -654,13 +654,31 @@ function cmdConfig(lsp) {
 // The aoughwl components (one per repoStem) + nimony, which must be built FIRST
 // because it is the compiler that builds all the others. There is no prebuilt
 // nimony binary, so `setup` clones + builds from source — deliberately.
+// A repoStem is release-installable (private-source) when any of its variants
+// carries release metadata: those components are fetched as hardened binaries
+// from a public release repo, never source-built. `setup` must NOT try to clone
+// them — the source repo (e.g. aoughwl/aowli) is private and the clone fails.
+function isReleaseStem(stem) {
+  return SLOTS.some((s) => s.variants.some((v) => v.repoStem === stem && v.releaseRepo));
+}
 function setupComponents() {
   const seen = new Set(), out = [];
   for (const s of SLOTS) for (const v of s.variants) {
-    if (v.origin !== "aoughwl" || seen.has(v.repoStem)) continue;
+    if (v.origin !== "aoughwl" || seen.has(v.repoStem) || isReleaseStem(v.repoStem)) continue;
     seen.add(v.repoStem);
     out.push({ name: "aowl" + v.repoStem, slug: "aoughwl/aowl" + v.repoStem,
       dir: path.join(HOME, "aowl" + v.repoStem), stem: v.repoStem });
+  }
+  return out;
+}
+// Private, binary-only components grouped by release repo (one download each).
+// Today: the aowli family (interp + dbg) from aoughwl/aowli-release.
+function setupReleases() {
+  const seen = new Set(), out = [];
+  for (const s of SLOTS) for (const v of s.variants) {
+    if (!v.releaseRepo || seen.has(v.releaseRepo)) continue;
+    seen.add(v.releaseRepo);
+    out.push({ name: "aowli", slug: v.releaseRepo });
   }
   return out;
 }
@@ -680,10 +698,17 @@ function cmdSetup(yes) {
     { name: "aowlkit", slug: "aoughwl/aowlkit", dir: path.join(HOME, "aowlkit"), lib: true },
     { name: "aowlhl",  slug: "aoughwl/aowlhl",  dir: path.join(HOME, "aowlhl"),  lib: true },
   ];
+  // The driver ("cargo") + the substrate superset driver. Node-based: they ship
+  // bin/ and need no build, but a fresh machine has no front-end without them.
+  const drivers = [
+    { name: "aowlmony",  slug: "aoughwl/aowlmony",  dir: path.join(HOME, "aowlmony") },
+    { name: "aoughwlup", slug: "aoughwl/aoughwlup", dir: path.join(HOME, "aoughwlup") },
+  ];
   const comps = [
     { name: "nimony", slug: "nim-lang/nimony", dir: path.join(HOME, "nimony"), first: true },
     ...sharedLibs,
     ...setupComponents(),
+    ...drivers,
   ];
   // Component build.sh scripts expect the freshly-built toolchain on PATH + a few
   // env paths (a classic NIM, the built NIMONY, its src, and the shared libs).
@@ -725,10 +750,26 @@ function cmdSetup(yes) {
       console.log(br.status === 0 ? "    " + C.green(G.ok + " built") : "    " + C.red(G.cross + " build exited " + br.status));
     }
   }
+  // Private, binary-only components (aowli interp + dbg): fetched from the public
+  // release repo — the step a pure source-setup can't do. This closes the fresh-
+  // build hole where `setup` used to try (and fail) to clone the private source.
+  const rels = setupReleases();
+  for (const rc of rels)
+    console.log("  " + C.amber("↓") + " " + C.bold(C.white(rc.name)) + C.dim("  " + rc.slug) +
+      C.violet("  ← private, binary release") + C.gray("  download → ~/.aowl/toolchains"));
   console.log("");
-  if (!yes) console.log("  " + C.gray(ready + " ready, " + clone + " to clone, " + build + " to build") +
+  if (!yes) console.log("  " + C.gray(ready + " ready, " + clone + " to clone, " + build + " to build" +
+    (rels.length ? ", " + rels.length + " release download" : "")) +
     C.dim("   ·   ") + C.teal(PROG + " setup --yes") + C.dim(" to execute"));
-  else { console.log("  " + C.gray("re-registering…")); cmdInit(); }
+  else {
+    console.log("  " + C.gray("re-registering…")); cmdInit();
+    if (rels.length) {
+      console.log(""); process.stdout.write(banner("private binaries from public release"));
+      const r = reg();
+      for (const rc of rels) installRelease(rc.name, r);
+      saveReg(r);
+    }
+  }
   console.log("");
 }
 
