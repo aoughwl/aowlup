@@ -61,8 +61,18 @@ fi
 
 say "aowlup installer  ·  $TRIPLE  ·  $REPO ($CHANNEL)"
 
-json="$(curl -fsSL -H 'Accept: application/vnd.github+json' "$API" 2>/dev/null)" ||
-  die "could not reach GitHub (or no such release: $CHANNEL)"
+json="$(curl -fsSL -H 'Accept: application/vnd.github+json' "$API" 2>/dev/null)" || json=""
+
+# `/releases/latest` EXCLUDES pre-releases, so a project whose only releases are
+# pre-releases has no "latest" at all — which is exactly the state a new project
+# is in, and an installer that dies there is broken for its whole early life.
+# Fall back to the releases LIST and take the newest entry.
+if [ -z "$json" ] && [ "$CHANNEL" = "latest" ]; then
+  say "no stable release yet — falling back to the newest pre-release"
+  json="$(curl -fsSL -H 'Accept: application/vnd.github+json' \
+          "https://api.github.com/repos/$REPO/releases?per_page=1" 2>/dev/null | sed '1s/^\[//; $s/\]$//')"
+fi
+[ -n "$json" ] || die "could not reach GitHub (or no such release: $CHANNEL)"
 
 # Pull the download URL for our asset without jq: one URL per line, keep ours.
 url="$(printf '%s' "$json" \

@@ -44,6 +44,11 @@ export PATH="$HOME/.aowl/bin:$PATH"
 aowlup setup --yes        # clones + builds the rest of the toolchain
 ```
 
+Published builds are at [releases](https://github.com/aoughwl/aowlup/releases).
+The current one is a **pre-release** and needs **glibc ≥ 2.34** (Ubuntu 22.04+,
+Debian 12+) — `install.sh` checks that before installing and tells you to build
+from source rather than leaving you a binary that cannot start.
+
 `install.sh` is POSIX sh and is the only part of this project not written in the
 language — it necessarily runs on a machine that has none of it yet. It downloads
 a prebuilt `aowlup` for your platform, **verifies its sha256**, and puts it in
