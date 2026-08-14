@@ -35,6 +35,25 @@ Once parity is complete the Nimony binary becomes `aowlup` and ships as a
 prebuilt release asset, so installing the toolchain no longer requires already
 having it.
 
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/aoughwl/aowlup/main/install.sh | sh
+export PATH="$HOME/.aowl/bin:$PATH"
+aowlup setup --yes        # clones + builds the rest of the toolchain
+```
+
+`install.sh` is POSIX sh and is the only part of this project not written in the
+language — it necessarily runs on a machine that has none of it yet. It downloads
+a prebuilt `aowlup` for your platform, **verifies its sha256**, and puts it in
+`~/.aowl/bin`; everything after that is `aowlup`'s job.
+
+`aowlup shim` then writes per-tool shims into `~/.aowl/bin` that resolve through
+the registry **on every run**, so switching profile changes what they execute
+without rewriting anything. `aowlup uninstall` and `aowlup rollback` undo an
+install — a version that turns out bad is a normal event, and needing to
+re-download to escape it is not.
+
 ## The three axes
 
 - **Variants** — every pipeline *slot* has interchangeable implementations. The

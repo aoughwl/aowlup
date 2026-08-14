@@ -167,4 +167,57 @@ proc ghLatestRelease*(slug: string): Release =
 
 proc downloadTo*(url, dest: string): bool =
   let r = runCaptured("curl", @["-sSL", "-m", "180", "-o", dest, url], "", false)
-  r.ok and r.exitCode == 0
+  let ok = r.ok and r.exitCode == 0
+  ok
+
+proc sha256Of*(path: string): string =
+  ## Shelled out: this runs before the toolchain it installs exists, so it can
+  ## only rely on what a base system already has.
+  let r = runCaptured("sha256sum", @[path], "", false)
+  if not r.ok or r.exitCode != 0: return ""
+  let parts = split(strip(r.output), ' ')
+  if parts.len > 0: parts[0] else: ""
+
+proc hostTriple*(): string =
+  ## `<os>-<arch>`, matching the asset naming a multi-platform release needs.
+  ## Selecting an asset by exact name works for exactly one platform, which is
+  ## the same as not supporting any.
+  let osr = runCaptured("uname", @["-s"], "", false)
+  let arr = runCaptured("uname", @["-m"], "", false)
+  var osName = if osr.ok: toLowerAscii(strip(osr.output)) else: ""
+  var arch = if arr.ok: strip(arr.output) else: ""
+  if osName == "darwin": osName = "macos"
+  if arch == "x86_64": arch = "amd64"
+  elif arch == "aarch64": arch = "arm64"
+  if osName.len == 0 or arch.len == 0: "" else: osName & "-" & arch
+
+proc pickAsset*(rel: Release, want: string): tuple[name, url, sha: string] =
+  ## Prefer the asset for THIS platform, fall back to the bare name, and pick up
+  ## a sibling `<asset>.sha256` when the release publishes one.
+  result = ("", "", "")
+  let triple = hostTriple()
+  var chosenName = ""
+  var chosenUrl = ""
+  if triple.len > 0:
+    for a in rel.assets:
+      if a.name == want & "-" & triple:
+        chosenName = a.name
+        chosenUrl = a.url
+  if chosenName.len == 0:
+    for a in rel.assets:
+      if a.name == want:
+        chosenName = a.name
+        chosenUrl = a.url
+  if chosenName.len == 0: return
+  var shaUrl = ""
+  for a in rel.assets:
+    if a.name == chosenName & ".sha256": shaUrl = a.url
+  (chosenName, chosenUrl, shaUrl)
+
+proc fetchExpectedSha*(url: string): string =
+  ## The published digest, as `sha256sum` writes it: "<hex>  <name>".
+  if url.len == 0: return ""
+  let r = runCaptured("curl", @["-sSL", "-m", "30", url], "", false)
+  if not r.ok or r.exitCode != 0: return ""
+  let parts = split(strip(r.output), ' ')
+  if parts.len > 0: parts[0] else: ""

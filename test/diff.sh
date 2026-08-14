@@ -37,7 +37,9 @@ fi
 #   which nosuchslot  : an unknown slot is now told apart from an unresolved one
 #                       and lists the slots that exist. The Node build reported a
 #                       typo as a missing build.
-EXPECTED_DIFF=("backend list" "which fmt" "which nosuchslot")
+#   help              : the nimony build adds shim / uninstall / rollback, which
+#                       the JS build never had.
+EXPECTED_DIFF=("backend list" "which fmt" "which nosuchslot" "help")
 
 CASES=(
   "help"

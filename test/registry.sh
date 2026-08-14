@@ -101,6 +101,52 @@ else
   bad "backend.json is written" "no $M"
 fi
 
+# 7 --------------------------------------------------------------- the shims
+"$NG" shim >/dev/null 2>&1
+SH="$AOWL_HOME/bin/aowli-interp"
+if [ -x "$SH" ]; then
+  # A shim must resolve at RUN time, not bake in today's answer — that is the
+  # difference between a shim and a fourth copy of the resolution result.
+  if grep -q "which interp" "$SH"; then
+    ok "shims resolve through the registry at run time"
+  else
+    bad "shims resolve through the registry at run time" "$(head -5 "$SH")"
+  fi
+else
+  bad "shim writes an executable per slot" "no $SH"
+fi
+
+# 8 ------------------------------------------------- rollback between versions
+mkdir -p "$AOWL_HOME/toolchains/aowli-interp/v0.1.0/bin"
+printf '#!/bin/sh\necho old\n' > "$AOWL_HOME/toolchains/aowli-interp/v0.1.0/bin/aowli-interp"
+chmod 755 "$AOWL_HOME/toolchains/aowli-interp/v0.1.0/bin/aowli-interp"
+sleep 1
+mkdir -p "$AOWL_HOME/toolchains/aowli-interp/v0.2.0/bin"
+printf '#!/bin/sh\necho new\n' > "$AOWL_HOME/toolchains/aowli-interp/v0.2.0/bin/aowli-interp"
+chmod 755 "$AOWL_HOME/toolchains/aowli-interp/v0.2.0/bin/aowli-interp"
+python3 - "$REG" <<'PYX'
+import json,sys
+p=sys.argv[1]
+d=json.load(open(p))
+d.setdefault("components",{})["interp"]={"source":"release","release":"aoughwl/aowli-release",
+  "version":"v0.2.0","bin":"","prefix":""}
+json.dump(d,open(p,"w"),indent=2)
+PYX
+out="$("$NG" rollback aowli 2>&1)"
+if echo "$out" | grep -q "v0.1.0"; then
+  ok "rollback moves a slot to the previous installed tag"
+else
+  bad "rollback moves a slot to the previous installed tag" "$(echo "$out" | head -3)"
+fi
+
+# 9 --------------------------------------------------------------- uninstall
+"$NG" uninstall aowli >/dev/null 2>&1
+if [ -d "$AOWL_HOME/toolchains/aowli-interp" ]; then
+  bad "uninstall removes the toolchain directory" "still present"
+else
+  ok "uninstall removes the toolchain directory"
+fi
+
 echo ""
 echo "$pass passed · $fail failed"
 [ "$fail" = 0 ] || exit 1

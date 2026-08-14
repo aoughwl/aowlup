@@ -10,3 +10,6 @@ bin/aowlup-ng
 
 # Machine-local include paths for the editor tooling (build.sh takes AOWLKIT).
 .aowlcode.flags
+
+# release artifacts, produced by ./release.sh
+dist/
