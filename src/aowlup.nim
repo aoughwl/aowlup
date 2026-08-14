@@ -17,8 +17,8 @@
 ##   AOWL_<SLOT> env → slot override → active profile's variant → dev probe → error.
 
 import std/[syncio, strutils, envvars, cmdline, os]
-import aowlkit/subprocess
-import aowlup/[ui, catalog, registry, resolve, gh]
+import aowlkit/[subprocess, tty]
+import aowlup/[catalog, registry, resolve, gh]
 
 const Prog = "aowlup"
 

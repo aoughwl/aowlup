@@ -13,7 +13,7 @@
 ##     "components":{ "<slot>": {source, release, version, bin, prefix} } }
 
 import std/[syncio, strutils, envvars, json, tables, os]
-import ui
+import aowlkit/tty
 
 type
   Link* = object
