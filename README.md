@@ -26,10 +26,11 @@ the manager for a self-hosted toolchain ought to be built by that toolchain.
 The JavaScript build in `bin/aowlup` stays the installed entry point and serves
 as the **oracle**: a command counts as ported only when its stdout, stderr and
 exit code are byte-identical to the original, or the difference is listed in
-`test/diff.sh` with a reason. Today that is 42 of 48 checks identical and 6
+`test/diff.sh` with a reason. Today that is 40 of 48 checks identical and 8
 deliberate improvements — real recorded versions instead of a hardcoded
-`"0.1.0"`, an unresolvable slot that names every path it probed, and an unknown
-slot told apart from an unbuilt one.
+`"0.1.0"`, an unresolvable slot that names every path it probed, an unknown slot
+told apart from an unbuilt one, and the new `shim` / `uninstall` / `rollback`
+commands.
 
 Once parity is complete the Nimony binary becomes `aowlup` and ships as a
 prebuilt release asset, so installing the toolchain no longer requires already
@@ -89,19 +90,22 @@ aowlup vscode [DIR] --yes   wire the editor / LSP to the active profile
 aowlup config [--lsp]       emit editor initializationOptions from the registry
 aowlup backend link S REPO  register a working repo for slot S
 aowlup which SLOT           print the resolved exe (raw)
+aowlup shim                 write ~/.aowl/bin shims that follow the profile
+aowlup install [NAME]       fetch a released binary component (verified)
+aowlup uninstall NAME       remove an installed release component
+aowlup rollback [NAME]      point a slot back at the previous installed tag
 ```
 
 **One-shot profile** (rustup `+toolchain` syntax): `aowlup +nimony doctor`,
 `aowlmony +nimony run foo.nim`. Ephemeral — it does not change your stored
 selection.
 
-## Install
-
-`aowlup` is a dependency-free Node script. Symlink it onto your `PATH`:
+## Building from source
 
 ```
-ln -sf "$PWD/bin/aowlup" ~/.local/bin/aowlup
-aowlup setup          # see the plan;  add --yes to clone + build
+./build.sh                 # → bin/aowlup-ng   (needs nimony + aowlkit)
+./release.sh               # → dist/aowlup-<os>-<arch> + .sha256
+ln -sf "$PWD/bin/aowlup-ng" ~/.local/bin/aowlup
 ```
 
 `~/.aowl` is the data home (the registry + resolved-component manifests);
@@ -109,5 +113,6 @@ aowlup setup          # see the plan;  add --yes to clone + build
 
 ## Layout
 
-- `bin/aowlup` — the manager (the whole tool; no runtime dependencies)
+- `src/aowlup.nim` + `src/aowlup/` — the manager, in the language it manages
+- `bin/aowlup` — the JavaScript build, kept as the differential oracle
 - `~/.aowl/` — data home: `registry.json`, `backends/<slot>/backend.json`
