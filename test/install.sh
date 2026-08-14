@@ -87,7 +87,27 @@ else
   bad "a release with no asset for this platform says so"
 fi
 
-# --- 5. the packaged artifact runs ------------------------------------------
+# --- 5. the glibc floor ------------------------------------------------------
+# A dynamically linked release runs only on a glibc at least as new as the one it
+# was built against. Recording the floor and REFUSING early is the difference
+# between "build from source instead" and a dynamic-loader error naming a symbol
+# version, which is the failure this whole gate exists to prevent.
+if [ -f "$ROOT/dist/aowlup-linux-amd64.glibc" ]; then
+  floor="$(cat "$ROOT/dist/aowlup-linux-amd64.glibc")"
+  case "$floor" in
+    [0-9]*.[0-9]*) ok "release.sh records the glibc floor ($floor)" ;;
+    *) bad "release.sh records a sane glibc floor" "got '$floor'" ;;
+  esac
+else
+  bad "release.sh records the glibc floor" "no dist/*.glibc — run ./release.sh"
+fi
+if grep -q 'needs glibc >=' "$ROOT/install.sh"; then
+  ok "install.sh refuses a build this machine's glibc cannot run"
+else
+  bad "install.sh refuses a build this machine's glibc cannot run"
+fi
+
+# --- 6. the packaged artifact runs ------------------------------------------
 # release.sh refuses to publish a binary that does not run. Assert that guard
 # exists, because a release artifact that cannot execute is the one failure the
 # whole install path cannot recover from.

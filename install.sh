@@ -97,6 +97,21 @@ else
   say "! the release publishes no .sha256 for this asset — installing unverified"
 fi
 
+# Refuse EARLY if this machine's glibc is older than the binary needs. Without
+# this the install "succeeds" and the first run dies in the dynamic loader with
+# a message that names a symbol version and nothing the user can act on.
+if curl -fsSL -o "$tmp/aowlup.glibc" "$url.glibc" 2>/dev/null; then
+  need="$(cat "$tmp/aowlup.glibc")"
+  have="$(ldd --version 2>/dev/null | head -1 | grep -o '[0-9]\+\.[0-9]\+' | tail -1)"
+  if [ -n "$need" ] && [ -n "$have" ]; then
+    lowest="$(printf '%s\n%s\n' "$need" "$have" | sort -V | head -1)"
+    if [ "$lowest" = "$have" ] && [ "$have" != "$need" ]; then
+      die "this build needs glibc >= $need and this system has $have — build from source instead: https://github.com/$REPO"
+    fi
+    say "glibc $have >= $need"
+  fi
+fi
+
 mkdir -p "$BIN_DIR"
 chmod 755 "$tmp/aowlup"
 mv "$tmp/aowlup" "$BIN_DIR/aowlup"

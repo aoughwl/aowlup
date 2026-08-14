@@ -24,6 +24,19 @@ OUT="dist/aowlup-$TRIPLE"
 cp bin/aowlup-ng "$OUT"
 chmod 755 "$OUT"
 
+# The GLIBC FLOOR. This binary is dynamically linked, so it runs only on a
+# system whose glibc is at least as new as the one it was built against. A
+# release that does not record that hands an older-distro user
+# "GLIBC_2.34 not found" from the dynamic loader — a failure with no connection
+# to anything they did, which is the exact shape release.sh exists to prevent.
+FLOOR="$(objdump -T "$OUT" 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1 | sed 's/GLIBC_//')"
+if [ -n "$FLOOR" ]; then
+  echo "$FLOOR" > "$OUT.glibc"
+  echo "  glibc floor: $FLOOR  (recorded in $(basename "$OUT").glibc)"
+else
+  echo "  glibc floor: none detected (static?)"
+fi
+
 if command -v sha256sum >/dev/null 2>&1; then
   (cd dist && sha256sum "aowlup-$TRIPLE" > "aowlup-$TRIPLE.sha256")
 elif command -v shasum >/dev/null 2>&1; then
@@ -42,4 +55,6 @@ fi
 echo "RELEASE-OK: $OUT"
 ls -la "$OUT"* | sed 's/^/  /'
 echo ""
-echo "  upload both files as release assets on aoughwl/aowlup"
+echo "  upload all three files as release assets on aoughwl/aowlup"
+echo "  (install.sh reads the .glibc floor and refuses rather than installing"
+echo "   a binary this machine cannot run)"
