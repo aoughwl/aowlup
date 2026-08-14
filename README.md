@@ -12,6 +12,29 @@ aowlup  ── manages the toolchain ──►  ~/.aowl/registry.json  ◄──
                                        (single source of truth)
 ```
 
+## Written in aowl
+
+`aowlup` is being rewritten from JavaScript into **the language it manages** —
+the manager for a self-hosted toolchain ought to be built by that toolchain.
+
+```sh
+./build.sh            # → bin/aowlup-ng   (needs nimony + aowlkit)
+./test/diff.sh        # every command, Node build vs Nimony build, byte-for-byte
+./test/registry.sh    # the write path, against a sandboxed AOWL_HOME
+```
+
+The JavaScript build in `bin/aowlup` stays the installed entry point and serves
+as the **oracle**: a command counts as ported only when its stdout, stderr and
+exit code are byte-identical to the original, or the difference is listed in
+`test/diff.sh` with a reason. Today that is 42 of 48 checks identical and 6
+deliberate improvements — real recorded versions instead of a hardcoded
+`"0.1.0"`, an unresolvable slot that names every path it probed, and an unknown
+slot told apart from an unbuilt one.
+
+Once parity is complete the Nimony binary becomes `aowlup` and ships as a
+prebuilt release asset, so installing the toolchain no longer requires already
+having it.
+
 ## The three axes
 
 - **Variants** — every pipeline *slot* has interchangeable implementations. The

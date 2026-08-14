@@ -1,3 +1,12 @@
 node_modules/
 *.log
 .DS_Store
+
+# Nimony build output. The binary is produced by ./build.sh and, once it reaches
+# parity, published as a release asset — it is never committed.
+nimcache/
+src/nimcache/
+bin/aowlup-ng
+
+# Machine-local include paths for the editor tooling (build.sh takes AOWLKIT).
+.aowlcode.flags
