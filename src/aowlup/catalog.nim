@@ -149,6 +149,17 @@ proc slotsOf*(): seq[Slot] =
     cfgKey: "aowllensExe", note: "NIF-lens: decls/render/index/outline/query",
     variants: @[ours("aowllens", "lens", "lens")])
 
+  # THE DRIVER ITSELF. It is not a stage of the pipeline, but it is the piece a
+  # person actually types, and leaving it out of the catalog meant `aowlup
+  # install` could fetch every component of a toolchain and not the thing that
+  # drives them: a stranger could install the manager and then have nothing to
+  # compile with. It carries a release asset for exactly that reason.
+  result.add Slot(slot: "driver", kind: "tool", consumes: ".nim", produces: "",
+    target: "", runner: "", modes: @[], defaultMode: "", flags: @[], needs: @[],
+    cfgKey: "", note: "aowlmony — compiles code against the selected toolchain",
+    variants: @[ours("aowlmony", "mony", "mony", "",
+                     "aoughwl/aowlmony", "aowlmony-linux-amd64")])
+
 proc profilesOf*(): seq[Profile] =
   ## Only the PASS slots differ; backends and tooling are ours in every profile.
   ## `hybrid` mirrors what the driver actually runs today.

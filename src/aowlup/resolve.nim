@@ -29,11 +29,20 @@ proc famNames(stem: string): seq[string] =
 
 proc binUnder*(v: Variant, prefix: string): string =
   ## Look for a variant's binary under an explicit prefix (a registry link).
+  ##
+  ## `<name>-ng` wins over `<name>` when both are present. That is this project's
+  ## convention while a tool is being rewritten in the language it serves: the
+  ## Nimony build is `bin/<name>-ng` and the implementation it replaces stays as
+  ## `bin/<name>`, kept as the differential oracle. Probing the bare name first
+  ## resolves a dev checkout to the OLD build — which is how `driver` resolved to
+  ## the JavaScript aowlmony on a machine that had already cut over.
   if v.origin == "nimony":
     let p = prefix & "/bin/" & v.bin
     return (if fileExists(p): p else: "")
   let names = famNames(v.binStem)
   for b in names:
+    let ng = prefix & "/bin/" & b & v.binSuffix & "-ng"
+    if fileExists(ng): return ng
     let p = prefix & "/bin/" & b & v.binSuffix
     if fileExists(p): return p
   ""
@@ -52,6 +61,9 @@ proc probeVariant*(v: Variant, tried: var seq[string]): string =
   let bins = famNames(v.binStem)
   for repo in repos:
     for b in bins:
+      let ng = home & "/" & repo & "/bin/" & b & v.binSuffix & "-ng"
+      tried.add ng
+      if fileExists(ng): return ng
       let p = home & "/" & repo & "/bin/" & b & v.binSuffix
       tried.add p
       if fileExists(p): return p

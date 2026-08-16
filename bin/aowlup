@@ -150,6 +150,13 @@ const SLOTS = [
   { slot: "lens", kind: "tool", consumes: ".s.nif", cfgKey: "aowllensExe",
     variants: [{ id: "aowllens", origin: "aoughwl", repoStem: "lens", binStem: "lens" }],
     note: "NIF-lens: decls/render/index/outline/query" },
+  // The driver itself. Not a stage of the pipeline, but it is the piece a person
+  // actually types, and leaving it out meant `install` could fetch every
+  // component of a toolchain and not the thing that drives them.
+  { slot: "driver", kind: "tool", consumes: ".nim", cfgKey: null,
+    variants: [{ id: "aowlmony", origin: "aoughwl", repoStem: "mony", binStem: "mony",
+                 releaseRepo: "aoughwl/aowlmony", releaseAsset: "aowlmony-linux-amd64" }],
+    note: "aowlmony — compiles code against the selected toolchain" },
 ];
 const bySlot = Object.fromEntries(SLOTS.map((s) => [s.slot, s]));
 
@@ -171,6 +178,12 @@ function probeVariant(v) {
   const suf = v.binSuffix || "";
   for (const repo of fam(v.repoStem)) {
     for (const bin of fam(v.binStem)) {
+      // `<name>-ng` beats `<name>`: while a tool is being rewritten in the
+      // language it serves, the Nimony build is bin/<name>-ng and the build it
+      // replaces stays as bin/<name> as the differential oracle. Probing the
+      // bare name first resolves a dev checkout to the OLD build.
+      const ng = path.join(HOME, repo, "bin", bin + suf + "-ng");
+      if (fs.existsSync(ng)) return ng;
       const p = path.join(HOME, repo, "bin", bin + suf);
       if (fs.existsSync(p)) return p;
     }
@@ -192,6 +205,8 @@ function binUnder(v, prefix) {
   }
   const suf = v.binSuffix || "";
   for (const bin of fam(v.binStem)) {
+    const ng = path.join(prefix, "bin", bin + suf + "-ng");
+    if (fs.existsSync(ng)) return ng;
     const p = path.join(prefix, "bin", bin + suf);
     if (fs.existsSync(p)) return p;
   }
