@@ -23,18 +23,18 @@ the manager for a self-hosted toolchain ought to be built by that toolchain.
 ./test/registry.sh    # the write path, against a sandboxed AOWL_HOME
 ```
 
-The JavaScript build in `bin/aowlup` stays the installed entry point and serves
-as the **oracle**: a command counts as ported only when its stdout, stderr and
-exit code are byte-identical to the original, or the difference is listed in
-`test/diff.sh` with a reason. Today that is 40 of 48 checks identical and 8
-deliberate improvements — real recorded versions instead of a hardcoded
-`"0.1.0"`, an unresolvable slot that names every path it probed, an unknown slot
-told apart from an unbuilt one, and the new `shim` / `uninstall` / `rollback`
-commands.
+**The Nimony build is now the installed one**, and the JavaScript build in
+`bin/aowlup` stays as the **oracle**: a command counts as ported only when its
+stdout, stderr and exit code are byte-identical to the original, or the
+difference is listed in `test/diff.sh` with a reason. Today that is 40 of 48
+checks identical and 8 deliberate improvements — real recorded versions instead
+of a hardcoded `"0.1.0"`, an unresolvable slot that names every path it probed,
+an unknown slot told apart from an unbuilt one, and the `shim` / `uninstall` /
+`rollback` commands.
 
-Once parity is complete the Nimony binary becomes `aowlup` and ships as a
-prebuilt release asset, so installing the toolchain no longer requires already
-having it.
+It is not dead code and it is not a fallback: when the two disagree, that
+disagreement is the finding. `aowlup-js` is kept on PATH so the comparison is
+always one command away.
 
 ## Install
 
@@ -121,11 +121,3 @@ ln -sf "$PWD/bin/aowlup-ng" ~/.local/bin/aowlup
 - `src/aowlup.nim` + `src/aowlup/` — the manager, in the language it manages
 - `bin/aowlup` — the JavaScript build, kept as the differential oracle
 - `~/.aowl/` — data home: `registry.json`, `backends/<slot>/backend.json`
-
-## Two builds in this repo, and which one you run
-
-`aowlup` is written in the language it manages. `bin/aowlup-ng` is that build
-and it is the one installed; `bin/aowlup` is the original Node implementation,
-kept as the **differential oracle** — `test/diff.sh` runs both over the whole
-command surface in both colour modes and requires byte-identical output, so a
-difference is either a bug or one of the listed, reasoned improvements.
