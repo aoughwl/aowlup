@@ -121,3 +121,11 @@ ln -sf "$PWD/bin/aowlup-ng" ~/.local/bin/aowlup
 - `src/aowlup.nim` + `src/aowlup/` — the manager, in the language it manages
 - `bin/aowlup` — the JavaScript build, kept as the differential oracle
 - `~/.aowl/` — data home: `registry.json`, `backends/<slot>/backend.json`
+
+## Two builds in this repo, and which one you run
+
+`aowlup` is written in the language it manages. `bin/aowlup-ng` is that build
+and it is the one installed; `bin/aowlup` is the original Node implementation,
+kept as the **differential oracle** — `test/diff.sh` runs both over the whole
+command surface in both colour modes and requires byte-identical output, so a
+difference is either a bug or one of the listed, reasoned improvements.
