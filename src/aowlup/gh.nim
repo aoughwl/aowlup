@@ -130,8 +130,21 @@ proc ghCompare*(dir: string): Compare =
     result.ahead = 0
 
 proc ghLatestRelease*(slug: string): Release =
+  ## The newest release worth installing.
+  ##
+  ## ⚠️ NOT `/releases/latest`, which is what this used to ask. That endpoint
+  ## means "the newest release that is neither a draft nor a PRE-release", so a
+  ## project whose only published build is an alpha gets a 404 — and the manager
+  ## reported it as `✗ aoughwl/aowlmony Not Found`, which reads as "no such
+  ## repository" for a repository that is public and does have a release. Every
+  ## first release this project publishes is a pre-release, so that was the
+  ## normal case failing, not an edge one.
+  ##
+  ## `/releases` lists newest first and includes pre-releases. A stable release
+  ## still wins when one exists; a pre-release is used only when nothing else is
+  ## published.
   result = Release(slug: slug, tag: "", assets: @[], error: "")
-  let got = curlJson("https://api.github.com/repos/" & slug & "/releases/latest", 15)
+  let got = curlJson("https://api.github.com/repos/" & slug & "/releases", 15)
   if not got.ok:
     result.error = "offline"
     return
@@ -144,26 +157,44 @@ proc ghLatestRelease*(slug: string): Release =
   if hasError(tree):
     result.error = "bad-json"
     return
-  for k, v in pairs(root(tree)):
-    case k
-    of "message":
-      result.error = getStr(v, "error")
+
+  var haveStable = false
+  var found = false
+  for rel in items(root(tree)):
+    # An error body is an OBJECT, not the expected array; its "message" is the
+    # only thing worth reporting and it must not be mistaken for a release.
+    var tag = ""
+    var isPre = false
+    var isDraft = false
+    var msg = ""
+    var assets: seq[Asset] = @[]
+    for k, v in pairs(rel):
+      case k
+      of "message": msg = getStr(v, "")
+      of "tag_name": tag = getStr(v, "")
+      of "prerelease": isPre = getStr(v, "") == "true"
+      of "draft": isDraft = getStr(v, "") == "true"
+      of "assets":
+        for a in items(v):
+          # NB: locals must NOT share a name with the object's fields — nimony
+          # mangles the collision into a C struct member that does not exist.
+          var assetName = ""
+          var assetUrl = ""
+          for ak, av in pairs(a):
+            if ak == "name": assetName = getStr(av, "")
+            elif ak == "browser_download_url": assetUrl = getStr(av, "")
+          if assetName.len > 0: assets.add Asset(name: assetName, url: assetUrl)
+      else: discard
+    if msg.len > 0:
+      result.error = msg
       return
-    of "tag_name":
-      result.tag = getStr(v, "")
-    of "assets":
-      for a in items(v):
-        # NB: locals must NOT share a name with the object's fields — nimony
-        # mangles the collision into a C struct member that does not exist, and
-        # the failure surfaces as a gcc error about the generated code.
-        var assetName = ""
-        var assetUrl = ""
-        for ak, av in pairs(a):
-          if ak == "name": assetName = getStr(av, "")
-          elif ak == "browser_download_url": assetUrl = getStr(av, "")
-        if assetName.len > 0:
-          result.assets.add Asset(name: assetName, url: assetUrl)
-    else: discard
+    if isDraft or tag.len == 0: continue
+    if found and (haveStable or isPre): continue
+    result.tag = tag
+    result.assets = assets
+    found = true
+    haveStable = not isPre
+    if haveStable: break
 
 proc downloadTo*(url, dest: string): bool =
   let r = runCaptured("curl", @["-sSL", "-m", "180", "-o", dest, url], "", false)

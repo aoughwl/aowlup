@@ -56,6 +56,32 @@ else
   bad "the installed binary runs with no toolchain and no source checkout"
 fi
 
+# --- and the DRIVER, which is the point of installing a toolchain ------------
+# A manager that installs everything except the thing you compile with has not
+# finished the job. This is also the case that caught two real bugs: the manager
+# asked `/releases/latest`, which 404s when every published build is a
+# PRE-release (reported as "Not Found", which reads as "no such repo"); and the
+# asset landed under its platform name, so the resolver — which looks for
+# `<prefix>/bin/<tool>` — could not find what had just been installed.
+AOWLUP_BIN="$SB/.aowl/bin/aowlup"
+if [ -x "$AOWLUP_BIN" ]; then
+  drv_out="$(HOME="$SB" AOWL_HOME="$SB/.aowl" NO_COLOR=1 "$AOWLUP_BIN" install aowlmony 2>&1)"
+  drv_bin="$(HOME="$SB" AOWL_HOME="$SB/.aowl" NO_COLOR=1 "$AOWLUP_BIN" which driver 2>/dev/null)"
+  if [ -n "$drv_bin" ] && [ -x "$drv_bin" ]; then
+    ok "the driver installs from its release and the resolver finds it"
+  else
+    bad "the driver installs from its release and the resolver finds it" \
+        "which driver → '$drv_bin'; $(echo "$drv_out" | tail -2 | tr '\n' '|')"
+  fi
+  if [ -n "$drv_bin" ] && NO_COLOR=1 "$drv_bin" help 2>/dev/null | grep -q aowlmony; then
+    ok "the installed driver runs"
+  else
+    bad "the installed driver runs"
+  fi
+else
+  echo "  — driver cases skipped: no installed aowlup at $AOWLUP_BIN"
+fi
+
 echo ""
 echo "$pass passed · $fail failed"
 [ "$fail" = 0 ] || exit 1

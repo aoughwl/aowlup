@@ -525,7 +525,13 @@ proc installRelease(slots: seq[Slot], name: string, r: var Registry): int =
         continue
       let tcdir = aowlHome() & "/toolchains/" & t.variantId & "/" & rel.tag
       discard execShellCmd("mkdir -p " & quoteShell(tcdir & "/bin"))
-      let dest = tcdir & "/bin/" & t.releaseAsset
+      # ⚠️ Installed under the TOOL's name, not the asset's. The asset name
+      # carries the platform (`aowlmony-linux-amd64`) so that one release can
+      # serve several; the resolver looks for `<prefix>/bin/<tool>`, so landing
+      # it under the asset name installs something nothing can find. It was
+      # invisible while the only released component happened to have an asset
+      # named exactly like its binary.
+      let dest = tcdir & "/bin/" & t.variantId
       stdout.write "    " & violet(GGear) & " " & teal(t.variantId) &
         gray(" ← " & picked.name & " …")
       if not downloadTo(picked.url, dest):
