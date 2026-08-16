@@ -295,6 +295,43 @@ proc gitShortRev(dir: string): string =
   let r = runCaptured("git", @["-C", dir, "rev-parse", "--short", "HEAD"], "", false)
   if r.ok and r.exitCode == 0: strip(r.output) else: ""
 
+proc healLinks(r: var Registry): seq[string] =
+  ## Repair what an OLDER manager wrote, on the way past.
+  ##
+  ## Two kinds of rot, both live in this machine's registry and both invisible
+  ## until something reads them:
+  ##
+  ## * `version` is the literal `"0.1.0"` for every link, because the JS manager
+  ##   wrote that string and never computed one. It made the column decoration —
+  ##   and worse, made `status` compare `"0.3.0"` to a release's `"v0.3.0"` and
+  ##   report an available update for ever.
+  ## * a link points at a repo that is no longer there (`fmt` -> `~/aowlfmt`,
+  ##   which does not exist on this machine). A resolver then reports the slot as
+  ##   unbuilt when the truth is that nothing is registered for it at all.
+  ##
+  ## Healing on READ rather than requiring a re-link means the repair happens the
+  ## next time anything writes, instead of waiting for someone to notice.
+  result = @[]
+  var fixed: seq[(string, Link)] = @[]
+  var dropped: seq[string] = @[]
+  for k, l in pairs(r.links):
+    if l.prefix.len > 0 and not dirExists(l.prefix):
+      dropped.add k
+      continue
+    if l.source == "release": continue          # a release tag IS its version
+    if l.version.len == 0 or l.version == "0.1.0":
+      let rev = gitShortRev(l.prefix)
+      if rev.len > 0:
+        fixed.add (k, Link(prefix: l.prefix, version: rev, source: l.source))
+  for d in dropped:
+    del(r.links, d)
+    result.add "dropped " & d & ": its repo is gone"
+  for f in fixed:
+    r.links[f[0]] = f[1]
+  if fixed.len > 0:
+    result.add "recovered a real version for " & $fixed.len & " link" &
+      (if fixed.len == 1: "" else: "s") & " that still said \"0.1.0\""
+
 proc cmdLink(slots: seq[Slot], r: var Registry, slot, repo: string) =
   let si = findSlot(slots, slot)
   if si < 0:
@@ -1174,6 +1211,8 @@ proc main() =
 
   let slots = slotsOf()
   var r = loadRegistry()
+  for note in healLinks(r):
+    stderr.writeLine "  " & amber(GWarn) & " " & gray("registry: " & note)
   let cmd = if args.len > 0: args[0] else: "help"
   let a1 = if args.len > 1: args[1] else: ""
   let a2 = if args.len > 2: args[2] else: ""
