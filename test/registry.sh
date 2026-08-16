@@ -12,6 +12,7 @@
 #   5. the write lock is exclusive, and a held lock fails loudly
 #   6. backend.json manifests are regenerated on every write, so a derived file
 #      cannot go stale against the registry that derives it
+#   7. `shim` never writes over the very binary it resolves to
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NG="${NG_BIN:-$ROOT/bin/aowlup-ng}"
@@ -145,6 +146,34 @@ if [ -d "$AOWL_HOME/toolchains/aowli-interp" ]; then
   bad "uninstall removes the toolchain directory" "still present"
 else
   ok "uninstall removes the toolchain directory"
+fi
+
+# 7 ------------------------------- a shim must never overwrite its own target
+# 🔴 IT DID. A shim is named after the VARIANT, and an installed binary is named
+# after the variant too — so for anything installed into ~/.aowl/bin (the aowli
+# family) the shim path and the binary path are THE SAME FILE. Writing it
+# destroyed the interpreter and left a script whose `which` answer was itself:
+# every run became infinite self-exec, which presents as a hang burning CPU, not
+# as a missing file. A two-line hello world went from 38ms to over 4 minutes.
+mkdir -p "$AOWL_HOME/bin"
+printf '#!/bin/sh\necho I-AM-THE-REAL-BINARY\n' > "$AOWL_HOME/bin/aowli-interp"
+chmod 755 "$AOWL_HOME/bin/aowli-interp"
+"$NG" backend link interp "$AOWL_HOME" >/dev/null 2>&1
+"$NG" shim >/dev/null 2>&1
+if "$AOWL_HOME/bin/aowli-interp" 2>/dev/null | grep -q I-AM-THE-REAL-BINARY; then
+  ok "shim leaves an installed binary of the same name alone"
+else
+  bad "shim leaves an installed binary of the same name alone" \
+      "it was overwritten: $(head -2 "$AOWL_HOME/bin/aowli-interp" | tr '\n' '|')"
+fi
+
+# and a file aowlup did not write is never replaced, whatever it is
+printf 'not a shim\n' > "$AOWL_HOME/bin/aowlsem"
+"$NG" shim >/dev/null 2>&1
+if grep -q "not a shim" "$AOWL_HOME/bin/aowlsem"; then
+  ok "shim refuses to overwrite a file it did not generate"
+else
+  bad "shim refuses to overwrite a file it did not generate"
 fi
 
 echo ""
