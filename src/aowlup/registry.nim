@@ -53,9 +53,11 @@ proc fileExists*(p: string): bool =
   else:
     false
 
-proc tildeAbbrev*(p: string): string =
-  let h = homeDir()
-  if h.len > 0 and p.startsWith(h): "~" & p[h.len ..< p.len] else: p
+# `tildeAbbrev` used to live here. It moved to aowlkit/tty when a second project
+# needed it: the second hand-roll of anything is the signal that it belongs in
+# the shared layer, not that it should be copied. Re-exported so the modules
+# that import this one keep compiling against one definition.
+export tildeAbbrev
 
 # --------------------------------------------------------------------------
 # reading
