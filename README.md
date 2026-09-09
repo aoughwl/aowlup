@@ -49,6 +49,18 @@ The current one is a **pre-release** and needs **glibc ≥ 2.34** (Ubuntu 22.04+
 Debian 12+) — `install.sh` checks that before installing and tells you to build
 from source rather than leaving you a binary that cannot start.
 
+**From a checkout, or on Windows** (no Windows release is published):
+
+```sh
+./install.sh --local      # installs THIS checkout into ~/.aowl/bin
+```
+
+It installs the Node build as `~/.aowl/bin/aowl` — the file aowlmony reads the
+registry through — plus an `aowlup` launcher (and `aowlup.cmd` on Windows). The
+Nimony build is installed as `aowlup` where it runs; on Windows it builds
+(`./build.sh` → `bin/aowlup-ng.exe`) and resolves the same slots the Node build
+does, but its shell-outs need a POSIX `sh`, so it stays the oracle there.
+
 `install.sh` is POSIX sh and is the only part of this project not written in the
 language — it necessarily runs on a machine that has none of it yet. It downloads
 a prebuilt `aowlup` for your platform, **verifies its sha256**, and puts it in
