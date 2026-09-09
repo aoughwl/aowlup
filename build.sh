@@ -9,9 +9,12 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NIMONY="${NIMONY:-$HOME/nimony/bin/nimony}"
+# nimony's Windows build is nimony.exe; the bare name is what a POSIX box has.
+[ -x "$NIMONY" ] || [ ! -x "$NIMONY.exe" ] || NIMONY="$NIMONY.exe"
 AOWLKIT="${AOWLKIT:-$HOME/aowlkit/src}"
 NIMLOCK="${NIMLOCK:-$HOME/.aowl/bin/nimlock}"
-OUT="$ROOT/bin/aowlup-ng"
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) EXE=.exe ;; *) EXE= ;; esac
+OUT="$ROOT/bin/aowlup-ng$EXE"
 cd "$ROOT"
 
 if [ ! -x "$NIMONY" ]; then
@@ -53,7 +56,10 @@ rc=$?
 
 # nimony can exit 0 on a failed build, so the exit status alone is not evidence.
 # Ask for the artifact, and require it to be NEWER than every source we compiled.
-BIN="$(ls -t "$ROOT"/src/nimcache/*/aowlup 2>/dev/null | head -1)"
+# The artifact is `aowlup` on POSIX and `aowlup.exe` on Windows; probing only
+# the bare name is why the build "failed" on Windows with a finished binary
+# sitting in nimcache.
+BIN="$(ls -t "$ROOT"/src/nimcache/*/aowlup "$ROOT"/src/nimcache/*/aowlup.exe 2>/dev/null | head -1)"
 if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
   echo "$log"
   echo "BUILD-FAIL: no binary produced (rc=$rc)" >&2
