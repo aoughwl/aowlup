@@ -42,7 +42,9 @@ const AOWL_HOME = process.env.AOWL_HOME || path.join(HOME, ".aowl");
 const REG = path.join(AOWL_HOME, "registry.json");
 // Displayed program name derives from how we were invoked (installed as `aowlup`,
 // but the file lives at ~/.aowl/bin/aowl), so hints read correctly either way.
-const PROG = path.basename(process.argv[1] || "aowlup");
+// A launcher that cannot be seen from argv (install.sh's `aowlup` → node aowl)
+// says its name in AOWLUP_PROG, or every hint would tell the user to type `aowl`.
+const PROG = process.env.AOWLUP_PROG || path.basename(process.argv[1] || "aowlup");
 
 // ============================ presentation layer =============================
 // No dependencies: truecolor ANSI, disabled on non-TTY / NO_COLOR / dumb terms.
@@ -170,10 +172,18 @@ const PROFILES = {
 };
 const DEFAULT_PROFILE = "hybrid";
 
+// An executable is `foo` on POSIX and `foo.exe` on Windows. Probing the bare
+// name only is why a fully-built nimony checkout still reported every
+// nimony-origin slot as "not built" on Windows.
+const EXE_SUFFIXES = process.platform === "win32" ? ["", ".exe", ".cmd", ".bat"] : [""];
+function exeAt(p) {
+  for (const s of EXE_SUFFIXES) if (fs.existsSync(p + s)) return p + s;
+  return null;
+}
+
 function probeVariant(v) {
   if (v.origin === "nimony") {
-    const p = path.join(HOME, v.repoDir, "bin", v.bin);
-    return fs.existsSync(p) ? p : null;
+    return exeAt(path.join(HOME, v.repoDir, "bin", v.bin));
   }
   const suf = v.binSuffix || "";
   for (const repo of fam(v.repoStem)) {
@@ -182,17 +192,17 @@ function probeVariant(v) {
       // language it serves, the Nimony build is bin/<name>-ng and the build it
       // replaces stays as bin/<name> as the differential oracle. Probing the
       // bare name first resolves a dev checkout to the OLD build.
-      const ng = path.join(HOME, repo, "bin", bin + suf + "-ng");
-      if (fs.existsSync(ng)) return ng;
-      const p = path.join(HOME, repo, "bin", bin + suf);
-      if (fs.existsSync(p)) return p;
+      const ng = exeAt(path.join(HOME, repo, "bin", bin + suf + "-ng"));
+      if (ng) return ng;
+      const p = exeAt(path.join(HOME, repo, "bin", bin + suf));
+      if (p) return p;
     }
     const nc = path.join(HOME, repo, "nimcache");
     try {
       for (const d of fs.readdirSync(nc))
         for (const bin of fam(v.binStem)) {
-          const p = path.join(nc, d, bin + suf);
-          if (fs.existsSync(p)) return p;
+          const p = exeAt(path.join(nc, d, bin + suf));
+          if (p) return p;
         }
     } catch (_) {}
   }
@@ -200,15 +210,14 @@ function probeVariant(v) {
 }
 function binUnder(v, prefix) {
   if (v.origin === "nimony") {
-    const p = path.join(prefix, "bin", v.bin);
-    return fs.existsSync(p) ? p : null;
+    return exeAt(path.join(prefix, "bin", v.bin));
   }
   const suf = v.binSuffix || "";
   for (const bin of fam(v.binStem)) {
-    const ng = path.join(prefix, "bin", bin + suf + "-ng");
-    if (fs.existsSync(ng)) return ng;
-    const p = path.join(prefix, "bin", bin + suf);
-    if (fs.existsSync(p)) return p;
+    const ng = exeAt(path.join(prefix, "bin", bin + suf + "-ng"));
+    if (ng) return ng;
+    const p = exeAt(path.join(prefix, "bin", bin + suf));
+    if (p) return p;
   }
   return null;
 }
@@ -796,7 +805,7 @@ function cmdSetup(yes) {
 function cmdVscode(dir, yes) {
   const r = reg();
   const lsp = resolve("lsp", r);
-  const nimonyBin = path.join(HOME, "nimony", "bin", "nimony");
+  const nimonyBin = exeAt(path.join(HOME, "nimony", "bin", "nimony")) || path.join(HOME, "nimony", "bin", "nimony");
   const hasNimony = fs.existsSync(nimonyBin);
   const settings = {
     "nimony.serverPath": lsp && lsp.bin ? lsp.bin : "",
@@ -876,9 +885,17 @@ function cmdRun(file, rest) {
   }
   // Not a pack: it is source. Compile+run it through aowlmony (the driver that
   // consumes the toolchain aowlup manages — rustup : cargo).
-  const mony = findOnPath("aowlmony") || path.join(HOME, "aowlmony", "bin", "aowlmony");
-  if (!fs.existsSync(mony)) die("run: not a pack, and no `aowlmony` found to compile source. Use `aowlmony run " + path.basename(abs) + "`.");
-  const r = cp.spawnSync(mony, ["run", abs].concat(rest || []), { stdio: "inherit" });
+  // The driver is either the Nimony build (bin/aowlmony-ng, native) or the Node
+  // script it is replacing. Windows cannot exec a script by name, so the script
+  // goes through node; the native build runs directly on every platform.
+  const mony = findOnPath("aowlmony") ||
+    exeAt(path.join(HOME, "aowlmony", "bin", "aowlmony-ng")) ||
+    exeAt(path.join(HOME, "aowlmony", "bin", "aowlmony"));
+  if (!mony || !fs.existsSync(mony)) die("run: not a pack, and no `aowlmony` found to compile source. Use `aowlmony run " + path.basename(abs) + "`.");
+  const isScript = /^#!.*node/.test(fs.readFileSync(mony, "latin1").slice(0, 64));
+  const r = isScript
+    ? cp.spawnSync(process.execPath, [mony, "run", abs].concat(rest || []), { stdio: "inherit" })
+    : cp.spawnSync(mony, ["run", abs].concat(rest || []), { stdio: "inherit" });
   process.exit(r.status === null ? 1 : r.status);
 }
 
@@ -886,8 +903,11 @@ function findOnPath(name) {
   const dirs = (process.env.PATH || "").split(path.delimiter);
   for (const d of dirs) {
     if (!d) continue;
-    const p = path.join(d, name);
-    try { if (fs.existsSync(p) && (fs.statSync(p).mode & 0o111)) return p; } catch (_) {}
+    for (const s of EXE_SUFFIXES) {
+      const p = path.join(d, name + s);
+      // mode bits mean nothing on Windows; the suffix is what makes it executable there
+      try { if (fs.existsSync(p) && (s || process.platform === "win32" || (fs.statSync(p).mode & 0o111))) return p; } catch (_) {}
+    }
   }
   return null;
 }
