@@ -27,6 +27,19 @@ proc famNames(stem: string): seq[string] =
   result = @[]
   for p in Prefixes: result.add p & stem
 
+# An executable is `foo` on POSIX and `foo.exe` on Windows. Probing the bare
+# name only is why a fully built nimony checkout reported every nimony-origin
+# slot as "not built" there — the same defect the Node build carried, fixed
+# the same way: every place a binary is looked for tries the platform's
+# spellings, bare name first so a POSIX box is unchanged.
+const ExeSuffixes = when defined(windows): ["", ".exe", ".cmd", ".bat"] else: [""]
+
+proc exeAt(p: string): string =
+  ## The first spelling of `p` that exists as a file, or "".
+  for s in ExeSuffixes:
+    if fileExists(p & s): return p & s
+  ""
+
 proc binUnder*(v: Variant, prefix: string): string =
   ## Look for a variant's binary under an explicit prefix (a registry link).
   ##
@@ -37,14 +50,13 @@ proc binUnder*(v: Variant, prefix: string): string =
   ## resolves a dev checkout to the OLD build — which is how `driver` resolved to
   ## the JavaScript aowlmony on a machine that had already cut over.
   if v.origin == "nimony":
-    let p = prefix & "/bin/" & v.bin
-    return (if fileExists(p): p else: "")
+    return exeAt(prefix & "/bin/" & v.bin)
   let names = famNames(v.binStem)
   for b in names:
-    let ng = prefix & "/bin/" & b & v.binSuffix & "-ng"
-    if fileExists(ng): return ng
-    let p = prefix & "/bin/" & b & v.binSuffix
-    if fileExists(p): return p
+    let ng = exeAt(prefix & "/bin/" & b & v.binSuffix & "-ng")
+    if ng.len > 0: return ng
+    let p = exeAt(prefix & "/bin/" & b & v.binSuffix)
+    if p.len > 0: return p
   ""
 
 proc probeVariant*(v: Variant, tried: var seq[string]): string =
@@ -55,7 +67,7 @@ proc probeVariant*(v: Variant, tried: var seq[string]): string =
   if v.origin == "nimony":
     let p = home & "/" & v.repoDir & "/bin/" & v.bin
     tried.add p
-    return (if fileExists(p): p else: "")
+    return exeAt(p)
 
   let repos = famNames(v.repoStem)
   let bins = famNames(v.binStem)
@@ -63,10 +75,12 @@ proc probeVariant*(v: Variant, tried: var seq[string]): string =
     for b in bins:
       let ng = home & "/" & repo & "/bin/" & b & v.binSuffix & "-ng"
       tried.add ng
-      if fileExists(ng): return ng
+      let ngHit = exeAt(ng)
+      if ngHit.len > 0: return ngHit
       let p = home & "/" & repo & "/bin/" & b & v.binSuffix
       tried.add p
-      if fileExists(p): return p
+      let hit = exeAt(p)
+      if hit.len > 0: return hit
   ""
 
 proc profileIsEphemeral*(): bool =
