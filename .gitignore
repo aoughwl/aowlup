@@ -13,3 +13,6 @@ bin/aowlup-ng
 
 # release artifacts, produced by ./release.sh
 dist/
+
+# The Windows build output (build.sh names the artifact after the platform).
+bin/aowlup-ng.exe
