@@ -108,6 +108,8 @@ aowlup config [--lsp]       emit editor initializationOptions from the registry
 aowlup backend link S REPO  register a working repo for slot S
 aowlup which SLOT           print the resolved exe (raw)
 aowlup shim                 write ~/.aowl/bin shims that follow the profile
+aowlup login KEY            activate a purchased licence, download what it unlocks
+                            (verified), activate this machine, register it
 aowlup install [NAME]       fetch a released binary component (verified)
 aowlup uninstall NAME       remove an installed release component
 aowlup rollback [NAME]      point a slot back at the previous installed tag

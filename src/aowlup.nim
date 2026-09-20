@@ -18,7 +18,7 @@
 
 import std/[syncio, strutils, envvars, cmdline, os]
 import aowlkit/[subprocess, tty]
-import aowlup/[catalog, registry, resolve, gh]
+import aowlup/[catalog, registry, resolve, gh, store]
 
 const Prog = "aowlup"
 
@@ -561,6 +561,83 @@ proc installRelease(slots: seq[Slot], name: string, r: var Registry): int =
       stdout.writeLine " " & green(GOk) & dim("  " & tildeAbbrev(dest))
       inc done
   done
+
+proc cmdLogin(slots: seq[Slot], r: var Registry, key: string) =
+  ## `aowlup login KEY` -- one command from a purchased key to working binaries:
+  ## ask the store what the key unlocks, download it, verify the checksum,
+  ## activate THIS machine (the package's own `aowli-activate` does that, so the
+  ## crypto lives in exactly one, tested place), and register what it contains.
+  stdout.write banner(Prog, "activate a purchased licence")
+  if key.len == 0:
+    die("usage: " & Prog & " login LICENCE-KEY     (the AOWL-… key from your purchase)")
+  stdout.writeLine "  " & teal(GGear) & " asking the store what this key unlocks …"
+  let info = storeDownload(key)
+  if not info.ok:
+    if info.error == "network":
+      die("could not reach aoughwl.com — check your connection and that curl is installed")
+    die("the store refused this key: " &
+        (if info.detail.len > 0: info.detail elif info.error.len > 0: info.error else: "unknown reason") &
+        "   (manage it at https://aoughwl.github.io/store/license)")
+  if info.url.len == 0 or info.version.len == 0:
+    die("the store did not name a release to download")
+
+  let tcdir = aowlHome() & "/toolchains/store/" & info.version
+  discard execShellCmd("mkdir -p " & quoteShell(tcdir))
+  let archive = tcdir & "/package.tar.gz"
+  stdout.write "  " & violet(GGear) & " downloading release " & teal(info.version) & " …"
+  if not downloadTo(info.url, archive):
+    stdout.writeLine " " & red(GCross & " download failed")
+    quit 1
+  # Verify before trusting: a truncated or swapped download must never become
+  # the binary this machine runs.
+  if info.sha256.len > 0:
+    let got = sha256Of(archive)
+    if got != info.sha256:
+      discard execShellCmd("rm -f " & quoteShell(archive))
+      stdout.writeLine " " & red(GCross & " checksum mismatch — discarded")
+      stdout.writeLine "      " & dim("expected " & info.sha256)
+      stdout.writeLine "      " & dim("got      " & (if got.len > 0: got else: "(no sha256sum)"))
+      quit 1
+  stdout.writeLine " " & green(GOk)
+
+  if execShellCmd("tar -C " & quoteShell(tcdir) & " -xzf " & quoteShell(archive)) != 0:
+    die("could not unpack the download")
+  discard execShellCmd("rm -f " & quoteShell(archive))
+
+  # The package layout is fixed by the release script: `aowli-<version>/{bin,lib}`.
+  let pkgDir = tcdir & "/aowli-" & info.version
+  let activateBin = pkgDir & "/bin/aowli-activate"
+  if not registry.fileExists(activateBin):
+    die("the download has no activate tool (looked for " & tildeAbbrev(activateBin) & ")")
+  discard execShellCmd("chmod +x " & quoteShell(activateBin))
+  stdout.write "  " & violet(GGear) & " activating on this machine …"
+  let act = runCaptured(activateBin, @[key], "", true)
+  if not act.ok or act.exitCode != 0:
+    stdout.writeLine " " & red(GCross)
+    die(strip(act.output))
+  stdout.writeLine " " & green(GOk)
+
+  var installed = 0
+  for name in ["aowli-interp", "aowli-dbg"]:
+    let bin = pkgDir & "/bin/" & name
+    if not registry.fileExists(bin): continue
+    let slot = if name == "aowli-interp": "interp" else: "dbg"
+    # source "release": a version that is a release tag, not a git rev, so
+    # healLinks leaves it alone.
+    r.components[slot] = Component(source: "release", release: "store:aowli",
+                                   version: info.version, bin: bin, prefix: pkgDir)
+    r.links[slot & "/" & name] = Link(prefix: pkgDir, version: info.version, source: "release")
+    stdout.writeLine "  " & green(GOk) & "  " & teal(slot) & dim("  " & tildeAbbrev(bin))
+    inc installed
+  if not persist(slots, r): quit 1
+  stdout.writeLine ""
+  if installed > 0:
+    stdout.writeLine "  " & green(GOk & " logged in — " & $installed & " component" &
+      (if installed == 1: "" else: "s") & " ready") & dim("   ·   ") & teal(Prog & " shim") &
+      gray(" puts them on your PATH")
+  else:
+    note("activated, but the package held nothing this manager recognises")
+  stdout.writeLine ""
 
 proc cmdInstall(slots: seq[Slot], r: var Registry, name: string) =
   stdout.write banner(Prog, "install from public release")
@@ -1192,6 +1269,7 @@ proc cmdHelp() =
   let rows = @[
     @[teal("run FILE [args]"), gray("run an aowl pack by reduction, or compile+run source")],
     @[teal("setup [--yes]"), gray("clone + build the whole toolchain (fresh machine)")],
+    @[teal("login KEY"), gray("activate a purchased licence and install what it unlocks")],
     @[teal("install [NAME]"), gray("fetch a private-source backend from its public release (aowli)")],
     @[teal("doctor"), gray("resolved toolchain for the active profile")],
     @[teal("profile [use N]"), gray("show / switch the whole-stack profile")],
@@ -1265,6 +1343,7 @@ proc main() =
   of "init": cmdInit(slots, r)
   of "setup": cmdSetup(slots, r, yes)
   of "install", "i": cmdInstall(slots, r, a1)
+  of "login": cmdLogin(slots, r, a1)
   of "doctor", "dr": cmdDoctor(slots, r)
   of "config": cmdConfig(slots, r, lsp)
   of "which": cmdWhich(slots, r, a1)
