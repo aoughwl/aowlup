@@ -661,7 +661,16 @@ proc cmdLogin(slots: seq[Slot], r: var Registry, key: string) =
 
 proc cmdInstall(slots: seq[Slot], r: var Registry, name: string) =
   stdout.write banner(Prog, "install from public release")
-  let want = if name.len > 0: name else: "aowli"
+  # aowli and its backends are paid and have no public release. Say where they
+  # come from instead of failing with "no component matches".
+  if name == "aowli" or name == "interp" or name == "dbg" or name == "aowli-interp" or
+     name == "aowli-dbg" or name == "aowlts" or name == "aowlpy" or name == "aowlweb":
+    note(name & " is part of the paid bundle, so it is not installed from a public release.")
+    note("Buy a licence at https://aoughwl.github.io/store/aowli, then run:")
+    stdout.writeLine "    " & teal(Prog & " login YOUR-LICENCE-KEY")
+    stdout.writeLine ""
+    return
+  let want = if name.len > 0: name else: "all"
   let done = installRelease(slots, want, r)
   if not persist(slots, r): quit 1
   stdout.writeLine ""
@@ -1290,7 +1299,7 @@ proc cmdHelp() =
     @[teal("run FILE [args]"), gray("run an aowl pack by reduction, or compile+run source")],
     @[teal("setup [--yes]"), gray("clone + build the whole toolchain (fresh machine)")],
     @[teal("login KEY"), gray("activate a purchased licence and install what it unlocks")],
-    @[teal("install [NAME]"), gray("fetch a private-source backend from its public release (aowli)")],
+    @[teal("install [NAME]"), gray("fetch a released binary component (aowlmony); aowli is via login")],
     @[teal("doctor"), gray("resolved toolchain for the active profile")],
     @[teal("profile [use N]"), gray("show / switch the whole-stack profile")],
     @[teal("use SLOT VAR"), gray("override one slot (e.g. use sem nimsem)")],

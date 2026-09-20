@@ -93,14 +93,14 @@ proc slotsOf*(): seq[Slot] =
     note: "node aowlc {mode} <f.c.nif>",
     variants: @[ours("aowlc", "c", "c")])
 
-  # interp and dbg are PRIVATE-source components: end users cannot build them,
-  # they fetch the published hardened binaries. releaseRepo/releaseAsset mark a
-  # variant as installable from the public release repo.
+  # interp and dbg are PRIVATE-source, PAID components: end users cannot build
+  # them and there is no public release to fetch. They arrive through
+  # `aowlup login KEY`, which registers them from the licensed package, so they
+  # carry NO releaseRepo/releaseAsset (that field means "anyone may download").
   result.add Slot(slot: "interp", kind: "backend", consumes: ".s.nif", produces: "",
     target: "interp", runner: "", modes: @[], defaultMode: "", flags: @[], needs: @[],
     cfgKey: "", note: "aowli-interp <f.s.nif> (tree-walk)",
-    variants: @[ours("aowli-interp", "i", "i", "-interp",
-                     "aoughwl/aowli-release", "aowli-interp")])
+    variants: @[ours("aowli-interp", "i", "i", "-interp")])
 
   # vm ships no release asset (unpublished) — link/local-build only.
   result.add Slot(slot: "vm", kind: "backend", consumes: ".s.nif", produces: "",
@@ -111,8 +111,7 @@ proc slotsOf*(): seq[Slot] =
   result.add Slot(slot: "dbg", kind: "tool", consumes: ".s.nif", produces: "",
     target: "", runner: "", modes: @[], defaultMode: "", flags: @[], needs: @[],
     cfgKey: "", note: "aowli-dbg <f.s.nif> (batch breakpoints / trace)",
-    variants: @[ours("aowli-dbg", "i", "i", "-dbg",
-                     "aoughwl/aowli-release", "aowli-dbg")])
+    variants: @[ours("aowli-dbg", "i", "i", "-dbg")])
 
   result.add Slot(slot: "js", kind: "backend", consumes: ".s.nif", produces: "",
     target: "js", runner: "", modes: @[], defaultMode: "", flags: @["--faithful"],
