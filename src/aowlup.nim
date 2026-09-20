@@ -617,17 +617,37 @@ proc cmdLogin(slots: seq[Slot], r: var Registry, key: string) =
     die(strip(act.output))
   stdout.writeLine " " & green(GOk)
 
+  # What the package holds is the package's business, not this manager's: it
+  # ships a MANIFEST.txt of `name slot` lines (slot `-` = a tool with no slot in
+  # the catalog). Adding a backend to the product therefore needs no aowlup
+  # release, only a new package.
+  var manifest = ""
+  try:
+    manifest = readFile(pkgDir & "/MANIFEST.txt")
+  except:
+    die("the download has no MANIFEST.txt (looked in " & tildeAbbrev(pkgDir) & ")")
   var installed = 0
-  for name in ["aowli-interp", "aowli-dbg"]:
+  var extras: seq[string] = @[]
+  for line in splitLines(manifest):
+    let parts = splitWhitespace(line)
+    if parts.len != 2: continue
+    let name = parts[0]
+    let slot = parts[1]
     let bin = pkgDir & "/bin/" & name
     if not registry.fileExists(bin): continue
-    let slot = if name == "aowli-interp": "interp" else: "dbg"
+    if slot == "-" or findSlot(slots, slot) < 0:
+      extras.add name
+      continue
     # source "release": a version that is a release tag, not a git rev, so
     # healLinks leaves it alone.
     r.components[slot] = Component(source: "release", release: "store:aowli",
                                    version: info.version, bin: bin, prefix: pkgDir)
     r.links[slot & "/" & name] = Link(prefix: pkgDir, version: info.version, source: "release")
     stdout.writeLine "  " & green(GOk) & "  " & teal(slot) & dim("  " & tildeAbbrev(bin))
+    inc installed
+  for name in extras:
+    stdout.writeLine "  " & green(GOk) & "  " & teal(name) &
+      dim("  " & tildeAbbrev(pkgDir & "/bin/" & name))
     inc installed
   if not persist(slots, r): quit 1
   stdout.writeLine ""
