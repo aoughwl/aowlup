@@ -479,6 +479,15 @@ proc runInherit(cmd: string, args: seq[string], cwd = ""): int =
   for a in args: line.add " " & quoteShell(a)
   execShellCmd(line)
 
+proc repoReachable(slug: string): bool =
+  ## Can this machine clone `slug`? `git ls-remote` with prompting off answers in
+  ## about a second and fails for a private repo without credentials. A stranger's
+  ## setup used to plan five private clones (aowlsem, aowlhexer, aowljs, aowlts,
+  ## aowlpy) and fail each one mid-run (stranger path, 2026-10-08).
+  let line = "GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true git ls-remote -h " &
+    quoteShell("https://github.com/" & slug & ".git") & " >/dev/null 2>&1"
+  execShellCmd(line) == 0
+
 type RelTarget = object
   slot: string
   variantId: string
@@ -1086,6 +1095,10 @@ proc cmdSetup(slots: seq[Slot], r: var Registry, yes: bool) =
       stdout.writeLine line
       inc ready
       continue
+    if not hasDir and not repoReachable(c.slug):
+      stdout.writeLine "  " & dim("–") & " " & tag &
+        dim("  private — skipped (no git access on this machine)")
+      continue
     if not hasDir:
       inc toClone
       if not c.lib: inc toBuild
@@ -1313,6 +1326,7 @@ proc cmdHelp() =
   let rows = @[
     @[teal("run FILE [args]"), gray("run an aowl pack by reduction, or compile+run source")],
     @[teal("setup [--yes]"), gray("clone + build the whole toolchain (fresh machine)")],
+    @[teal("init"), gray("create ~/.aowl and register components already built")],
     @[teal("login KEY"), gray("activate a purchased licence and install what it unlocks")],
     @[teal("install [NAME]"), gray("fetch a released binary component (aowlmony); aowli is via login")],
     @[teal("doctor"), gray("resolved toolchain for the active profile")],
