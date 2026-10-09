@@ -38,11 +38,24 @@ always one command away.
 
 ## Install
 
+Needs Linux x86-64, `git`, `curl`, `gcc`, [Nim 2](https://nim-lang.org/install.html)
+(used once, to build the nimony compiler) and [Node.js](https://nodejs.org) (the C
+backend's linker driver).
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/aoughwl/aowlup/main/install.sh | sh
 export PATH="$HOME/.aowl/bin:$PATH"
-aowlup setup --yes        # clones + builds the rest of the toolchain
+aowlup setup --yes        # clones + builds the rest of the toolchain (2-3 min)
+aowlup install aowlmony   # the driver
+
+printf 'import std/syncio\necho "hello"\n' > hello.nim
+aowlmony run hello.nim
 ```
+
+Measured on an empty home directory with no git credentials (2026-10-08): 181 s
+from `install.sh` to a running native binary. Components whose source is private
+report `clone failed` during setup and are skipped. The walkthrough, with a
+browser-only option first, is **[Get started in 5 minutes](https://aoughwl.github.io/start)**.
 
 Published builds are at [releases](https://github.com/aoughwl/aowlup/releases).
 The current one is a **pre-release** and needs **glibc ≥ 2.34** (Ubuntu 22.04+,
