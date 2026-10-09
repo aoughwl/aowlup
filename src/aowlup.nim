@@ -1043,6 +1043,8 @@ proc readyDir(c: SetupComp): string =
     if hasBuiltBin(d): return d
   ""
 
+proc cmdShim(slots: seq[Slot], r: Registry)
+
 proc cmdSetup(slots: seq[Slot], r: var Registry, yes: bool) =
   stdout.write banner(Prog, if yes: "installing the toolchain"
                             else: "setup plan  " & dim("(add --yes to execute)"))
@@ -1157,6 +1159,9 @@ proc cmdSetup(slots: seq[Slot], r: var Registry, yes: bool) =
   else:
     note("re-registering…")
     cmdInit(slots, r)
+    # and put every tool on the PATH setup is about to tell the user to add:
+    # before this, ~/.aowl/bin held nothing but aowlup itself.
+    cmdShim(slots, r)
   stdout.writeLine ""
 
 # --------------------------------------------------------------------------
@@ -1171,8 +1176,12 @@ proc cmdShim(slots: seq[Slot], r: Registry) =
   ## stale exactly the way the backend manifests used to.
   let bindir = aowlHome() & "/bin"
   discard execShellCmd("mkdir -p " & quoteShell(bindir))
+  # A dev box has a checkout; a machine set up from install.sh has only the
+  # release binary in ~/.aowl/bin. Shims that named the checkout unconditionally
+  # answered "resolves to nothing" for every tool on such a machine.
   var self = homeDir() & "/aowlup/bin/aowlup-ng"
   if not registry.fileExists(self): self = homeDir() & "/aowlup/bin/aowlup"
+  if not registry.fileExists(self): self = bindir & "/aowlup"
   var made = 0
   var skipped: seq[string] = @[]
   for s in slots:
