@@ -458,8 +458,12 @@ proc buildRecipe(dir: string): Recipe =
     if registry.fileExists(hastur):
       return Recipe(cmd: hastur, args: @["build", "all"], cwd: dir,
                     hint: "hastur build all", found: true)
-    return Recipe(cmd: findNim(), args: @["c", "-r", "src/hastur", "build", "all"],
-                  cwd: dir, hint: "nim c -r src/hastur build all", found: true)
+    # upstream moved the entry point to src/hastur/hastur.nim; the fork still
+    # has src/hastur.nim. Build whichever this checkout has.
+    let entry = if registry.fileExists(dir & "/src/hastur.nim"): "src/hastur"
+                else: "src/hastur/hastur"
+    return Recipe(cmd: findNim(), args: @["c", "-r", entry, "build", "all"],
+                  cwd: dir, hint: "nim c -r " & entry & " build all", found: true)
   if registry.fileExists(dir & "/build.sh"):
     return Recipe(cmd: "bash", args: @["build.sh"], cwd: dir, hint: "./build.sh", found: true)
   if registry.fileExists(dir & "/Makefile"):
@@ -1045,7 +1049,10 @@ proc cmdSetup(slots: seq[Slot], r: var Registry, yes: bool) =
   let home = homeDir()
   var comps: seq[SetupComp] = @[]
   # nimony first: it is the compiler that builds all the others.
-  comps.add SetupComp(name: "nimony", slug: "nim-lang/nimony", dir: home & "/nimony",
+  # The aoughwl fork, not upstream: aowlhexer/aowlsem/aowlc are pinned to its
+  # API, and against upstream master aowlhexer fails to compile
+  # (`PackedLineInfo` undeclared, measured 2026-10-08 on a clean machine).
+  comps.add SetupComp(name: "nimony", slug: "aoughwl/nimony", dir: home & "/nimony",
                       stem: "", first: true, lib: false)
   # shared source libs (consumed via -p:, no build) — before the components whose
   # build.sh scripts reference them by env.
@@ -1131,26 +1138,25 @@ proc cmdSetup(slots: seq[Slot], r: var Registry, yes: bool) =
     for x in relRepos:
       if x == t.releaseRepo: seen = true
     if not seen: relRepos.add t.releaseRepo
-  for slug in relRepos:
-    stdout.writeLine "  " & amber("↓") & " " & bold(white("aowli")) & dim("  " & slug) &
-      violet("  ← private, binary release") & gray("  download → ~/.aowl/toolchains")
+  # The private binaries are the paid bundle (aowli, its debugger, the TS /
+  # Python / JS-WASM backends): `login` installs them. Setup used to list one
+  # "aowli" row per release repo — including aowlmony's, which is not an aowli
+  # release — then download nothing and exit 1 without saying why.
+  if relRepos.len > 0:
+    stdout.writeLine "  " & dim("·") & " " & bold(white("paid bundle")) &
+      gray("  aowli, its debugger, the TS / Python / JS-WASM backends — ") &
+      teal(Prog & " login YOUR-KEY") & gray(" installs them")
   stdout.writeLine ""
 
   if not yes:
     # one gray() span, not two — a second span restarts the SGR sequence and the
     # bytes stop matching even though the words are the same.
     var summary = $ready & " ready, " & $toClone & " to clone, " & $toBuild & " to build"
-    if relRepos.len > 0: summary.add ", " & $relRepos.len & " release download"
     stdout.writeLine "  " & gray(summary) & dim("   ·   ") &
       teal(Prog & " setup --yes") & dim(" to execute")
   else:
     note("re-registering…")
     cmdInit(slots, r)
-    if relRepos.len > 0:
-      stdout.writeLine ""
-      stdout.write banner(Prog, "private binaries from public release")
-      discard installRelease(slots, "aowli", r)
-      if not persist(slots, r): quit 1
   stdout.writeLine ""
 
 # --------------------------------------------------------------------------

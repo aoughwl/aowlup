@@ -638,7 +638,9 @@ function buildRecipe(dir) {
     // incremental if hastur is already built; else the canonical from-scratch
     // bootstrap: classic Nim compiles hastur AND builds the whole toolchain.
     if (fs.existsSync(hastur)) return { cmd: hastur, args: ["build", "all"], cwd: dir, hint: "hastur build all" };
-    return { cmd: findNim(), args: ["c", "-r", "src/hastur", "build", "all"], cwd: dir, hint: "nim c -r src/hastur build all" };
+    // upstream moved the entry point to src/hastur/hastur.nim; the fork has src/hastur.nim
+  const entry = fs.existsSync(path.join(dir, "src", "hastur.nim")) ? "src/hastur" : "src/hastur/hastur";
+  return { cmd: findNim(), args: ["c", "-r", entry, "build", "all"], cwd: dir, hint: `nim c -r ${entry} build all` };
   }
   if (fs.existsSync(path.join(dir, "build.sh"))) return { cmd: "bash", args: ["build.sh"], cwd: dir, hint: "./build.sh" };
   if (fs.existsSync(path.join(dir, "Makefile"))) return { cmd: "make", args: [], cwd: dir, hint: "make" };
@@ -729,7 +731,7 @@ function cmdSetup(yes) {
     { name: "aoughwlup", slug: "aoughwl/aoughwlup", dir: path.join(HOME, "aoughwlup") },
   ];
   const comps = [
-    { name: "nimony", slug: "nim-lang/nimony", dir: path.join(HOME, "nimony"), first: true },
+    { name: "nimony", slug: "aoughwl/nimony", dir: path.join(HOME, "nimony"), first: true },
     ...sharedLibs,
     ...setupComponents(),
     ...drivers,

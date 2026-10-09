@@ -158,6 +158,15 @@ proc ghLatestRelease*(slug: string): Release =
     result.error = "bad-json"
     return
 
+  # A private or missing repo answers with an error OBJECT ({"message": "Not
+  # Found"}), and `items` on an object is an assertion failure: that crashed the
+  # last step of every `aowlup setup` run without git credentials.
+  if strip(got.body).startsWith("{"):
+    for k, v in pairs(root(tree)):
+      if k == "message": result.error = getStr(v, "")
+    if result.error.len == 0: result.error = "not-a-release-list"
+    return
+
   var haveStable = false
   var found = false
   for rel in items(root(tree)):
